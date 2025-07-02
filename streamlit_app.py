@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import tempfile
 from datetime import datetime
-import se_economics_engine_v6 as engine
+import se_economics_engine_v5 as engine
 
 st.set_page_config(page_title="Schaper Econ Engine", layout="wide")
 st.title("📊 Schaper Energy Consulting Economics Engine")
