@@ -1,20 +1,16 @@
 import streamlit as st
 import pandas as pd
-from io import BytesIO
 import tempfile
 from datetime import datetime
 import se_economics_engine_v5 as engine
-import se_economics_engine_v5 as engine
-
 
 st.set_page_config(page_title="Schaper Econ Engine", layout="wide")
-
 st.title("📊 Schaper Energy Consulting Economics Engine")
 
 # Sidebar inputs
 st.sidebar.header("1. Upload Inputs")
 forecast_file = st.sidebar.file_uploader("Forecast CSV", type=["csv"])
-excel_file   = st.sidebar.file_uploader("Economic Inputs Excel", type=["xlsx", "xls"])
+excel_file    = st.sidebar.file_uploader("Economic Inputs Excel", type=["xlsx", "xls"])
 
 st.sidebar.header("2. Econ Parameters")
 effective_date = st.sidebar.date_input("Effective Date", value=datetime.today())
@@ -33,11 +29,36 @@ if run:
     if not forecast_file or not excel_file:
         st.sidebar.error("Please upload both CSV and Excel files.")
     else:
-        # 1) Load forecast
-        df_forecast = pd.read_csv(forecast_file)
-        df_forecast['API14'] = engine.clean_api14(df_forecast['API14'])
-        
-        # 2) Load overrides
+        # 1) Load & normalize forecast
+        df = pd.read_csv(forecast_file)
+        df.columns = df.columns.str.strip()  # trim whitespace
+        lower_map = {c.lower(): c for c in df.columns}
+
+        # map common variants → engine’s expected names
+        col_map = {
+            'API14'     : ['api14', 'api', 'well api'],
+            'Year'      : ['year', 'yr'],
+            'Mo'        : ['mo', 'month'],
+            'Oil (bbl)' : ['oil (bbl)', 'oil_bbl', 'oil'],
+            'Gas (mcf)' : ['gas (mcf)', 'gas_mcf', 'gas'],
+            'NGL (bbl)' : ['ngl (bbl)', 'ngl_bbl', 'ngl']
+        }
+        rename_dict = {}
+        for std_name, variants in col_map.items():
+            for v in variants:
+                if v in lower_map:
+                    rename_dict[lower_map[v]] = std_name
+                    break
+
+        df = df.rename(columns=rename_dict)
+
+        # sanity-check
+        st.write("🧐 Forecast columns:", df.columns.tolist())
+
+        # now safe to clean API14 & hand off to engine
+        df['API14'] = engine.clean_api14(df['API14'])
+
+        # 2) Load Excel overrides
         xl = pd.ExcelFile(excel_file)
         df_ownership = xl.parse("Ownership")     if "Ownership"     in xl.sheet_names else None
         df_strip     = xl.parse("Strip")         if "Strip"         in xl.sheet_names else None
@@ -45,11 +66,11 @@ if run:
         df_opex      = xl.parse("Expenses")      if "Expenses"      in xl.sheet_names else None
         df_capex     = xl.parse("Capital")       if "Capital"       in xl.sheet_names else None
 
-        for df in (df_ownership, df_diff, df_opex, df_capex):
-            if df is not None:
-                df['API14'] = engine.clean_api14(df['API14'])
+        for df_ in (df_ownership, df_diff, df_opex, df_capex):
+            if df_ is not None and 'API14' in df_.columns:
+                df_['API14'] = engine.clean_api14(df_['API14'])
 
-        # 3) Build econ_params
+        # 3) Build params & run
         econ_params = {
             "Effective Date": effective_date,
             "Discount Rate":  discount_rate,
@@ -61,48 +82,33 @@ if run:
             "Shrink": shrink
         }
 
-        # 4) Run engine
-        well_forecasts = engine.build_forecast_inputs(
-            df_forecast, econ_params,
-            df_ownership=df_ownership,
-            df_diff=df_diff,
-            df_opex=df_opex,
-            df_capex=df_capex
-        )
-
-        well_cashflows, total_cashflow = engine.calculate_cashflows(
-            well_forecasts,
+        wells, total = engine.calculate_cashflows(
+            engine.build_forecast_inputs(
+                df, econ_params,
+                df_ownership=df_ownership,
+                df_diff=df_diff,
+                df_opex=df_opex,
+                df_capex=df_capex
+            ),
             effective_date=econ_params["Effective Date"],
             discount_rate=econ_params["Discount Rate"],
             df_strip=df_strip
         )
 
-        # 5) Generate PDFs to temp files
-        tmp_yearly  = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
-        tmp_monthly = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
+        # 4) Generate & offer downloads
+        tmp1 = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
+        tmp2 = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
 
-        engine.generate_cashflow_pdf_table(
-            well_cashflows, total_cashflow, econ_params, output_path=tmp_yearly
-        )
+        engine.generate_cashflow_pdf_table(wells, total, econ_params, tmp1)
         engine.generate_cashflow_pdf_table_with_monthly(
-            well_cashflows, total_cashflow, econ_params,
-            output_path=tmp_monthly,
-            get_aries_summary_text=engine.get_aries_summary_text
+            wells, total, econ_params, tmp2, engine.get_aries_summary_text
         )
 
-        # 6) Download buttons
-        with open(tmp_yearly, "rb") as f:
-            st.download_button(
-                label="📥 Download Yearly Report",
-                data=f.read(),
-                file_name=f"Yearly_Cashflow_{datetime.today():%Y%m%d}.pdf",
-                mime="application/pdf"
-            )
-
-        with open(tmp_monthly, "rb") as f:
-            st.download_button(
-                label="📥 Download Monthly Report",
-                data=f.read(),
-                file_name=f"Monthly_Cashflow_{datetime.today():%Y%m%d}.pdf",
-                mime="application/pdf"
-            )
+        with open(tmp1, "rb") as f1:
+            st.download_button("📥 Download Yearly Report", f1.read(),
+                               file_name=f"Yearly_{datetime.today():%Y%m%d}.pdf",
+                               mime="application/pdf")
+        with open(tmp2, "rb") as f2:
+            st.download_button("📥 Download Monthly Report", f2.read(),
+                               file_name=f"Monthly_{datetime.today():%Y%m%d}.pdf",
+                               mime="application/pdf")
