@@ -1,9 +1,8 @@
-# streamlit_app.py
 import streamlit as st
 import pandas as pd
 import tempfile
 from datetime import datetime
-import se_economics_engine_v5 as engine
+import se_economics_engine_v6 as engine
 
 st.set_page_config(page_title="Schaper Econ Engine", layout="wide")
 st.title("📊 Schaper Energy Consulting Economics Engine")
@@ -30,27 +29,23 @@ if st.sidebar.button("▶️ Run Reports"):
         st.sidebar.error("Please upload both files.")
         st.stop()
 
-    # Load and prep forecast
+    # Load and prepare forecast
     df = pd.read_csv(forecast_file)
     df.columns = df.columns.str.strip()
-    required = ["API14","Date","WellName","OilProduction_bbl_month","GasProduction_MCF_month"]
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        st.error(f"Missing columns: {missing}")
-        st.stop()
-
+    # parse Date into Year/Mo
     df["Date"] = pd.to_datetime(df["Date"])
     df["Year"] = df["Date"].dt.year
     df["Mo"]   = df["Date"].dt.month
+    # rename production columns
     df["Oil (bbl)"] = df["OilProduction_bbl_month"]
     df["Gas (mcf)"] = df["GasProduction_MCF_month"]
     df["NGL (bbl)"] = 0.0
-    df["API14"] = engine.clean_api14(df["API14"])
+    df["API14"]     = engine.clean_api14(df["API14"])
 
     st.write("🔍 Sample forecast:")
     st.dataframe(df[["API14","WellName","Date","Year","Mo","Oil (bbl)","Gas (mcf)"]].head())
 
-    # Load overrides
+    # Load Excel overrides
     xl = pd.ExcelFile(excel_file)
     sheets = xl.sheet_names
     df_ownership = xl.parse("Ownership")     if "Ownership"     in sheets else None
@@ -59,11 +54,11 @@ if st.sidebar.button("▶️ Run Reports"):
     df_opex      = xl.parse("Expenses")      if "Expenses"      in sheets else None
     df_capex     = xl.parse("Capital")       if "Capital"       in sheets else None
 
-    for df_ in (df_ownership, df_strip, df_diff, df_opex, df_capex):
+    for df_ in (df_ownership, df_diff, df_opex, df_capex):
         if isinstance(df_, pd.DataFrame) and "API14" in df_.columns:
             df_["API14"] = engine.clean_api14(df_["API14"])
 
-    # Econ params dict
+    # Build econ_params
     econ_params = {
         "Effective Date":      effective_date,
         "Discount Rate":       discount_rate,
@@ -85,8 +80,8 @@ if st.sidebar.button("▶️ Run Reports"):
                  )
     well_cfs, total_cf = engine.calculate_cashflows(
                              inputs,
-                             effective_date=effective_date,
-                             discount_rate=discount_rate,
+                             effective_date=econ_params["Effective Date"],
+                             discount_rate=econ_params["Discount Rate"],
                              df_strip=df_strip
                          )
 
@@ -98,8 +93,7 @@ if st.sidebar.button("▶️ Run Reports"):
         well_cfs, total_cf, econ_params, tmp_yearly
     )
     engine.generate_cashflow_pdf_table_with_monthly(
-        well_cfs, total_cf, econ_params, tmp_monthly,
-        engine.get_aries_summary_text
+        well_cfs, total_cf, econ_params, tmp_monthly
     )
 
     # Download buttons
@@ -107,13 +101,13 @@ if st.sidebar.button("▶️ Run Reports"):
         st.download_button(
             "📥 Download Yearly Report",
             f.read(),
-            file_name=f"Yearly_{datetime.today():%Y%m%d}.pdf",
+            file_name=f"Yearly_Cashflow_{datetime.today():%Y%m%d}.pdf",
             mime="application/pdf"
         )
     with open(tmp_monthly, "rb") as f:
         st.download_button(
             "📥 Download Monthly Report",
             f.read(),
-            file_name=f"Monthly_{datetime.today():%Y%m%d}.pdf",
+            file_name=f"Monthly_Cashflow_{datetime.today():%Y%m%d}.pdf",
             mime="application/pdf"
         )
