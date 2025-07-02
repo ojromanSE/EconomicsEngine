@@ -11,6 +11,7 @@ import numpy_financial as npf
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from datetime import datetime
+from dateutil.relativedelta import relativedelta
 
 
 def clean_api14(series):
@@ -132,9 +133,11 @@ def calculate_cashflows(
             'NGL': w['NGL (bbl)'],
         })
         # Date, Year, Mo
-        df['Date'] = pd.to_datetime(effective_date) + pd.to_timedelta(df['Months'], unit='M')
-        df['Year'] = df['Date'].dt.year
-        df['Mo']   = df['Date'].dt.month
+         df['Date'] = pd.to_datetime(effective_date) + pd.to_timedelta(df['Months'], unit='M')
+         base = pd.to_datetime(effective_date)
+         df['Date'] = df['Months'].apply(lambda m: base + relativedelta(months=int(m)))
+         df['Year'] = df['Date'].dt.year
+         df['Mo']   = df['Date'].dt.month
 
         # Pricing
         df['Oil Price'] = w['Oil Price']
