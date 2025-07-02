@@ -1,127 +1,22 @@
 
-import numpy_financial as nf
+# se_economics_engine_v5.py
+# Cleaned Economics Engine module (Colab bits removed)
 
-
-# 📁 Upload your forecast CSV
-from google.colab import files
 import pandas as pd
-
-uploaded = files.upload()
-file_name = next(iter(uploaded))
-df_forecast = pd.read_csv(file_name)
-# 🔧 Helper to clean API14 (removes .0, pads to 14 digits, treats as string)
-def clean_api14(series):
-    return series.apply(lambda x: str(x).split('.')[0]).astype(str)
-
-# 🔍 Ensure consistent API14 formatting
-df_forecast['API14'] = clean_api14(df_forecast['API14'])
-
-# ✅ Preview
-df_forecast.head()
-
-"""## Load Economic Input Template"""
-
-# 📅 Set Effective Date + Upload economic inputs from Excel
-from datetime import datetime
-from google.colab import files
-import pandas as pd
-
-
-
-# 📤 Force Excel upload
-use_custom_excel = True
-
-# 🔄 Initialize inputs
-df_strip = None
-df_ownership = None
-df_diff = None
-df_opex = None
-df_capex = None
-
-if use_custom_excel:
-    print("📥 Upload multi-sheet Excel:")
-    uploaded = files.upload()
-    excel_file = next(iter(uploaded))
-    xl = pd.ExcelFile(excel_file)
-    sheet_names = xl.sheet_names
-    print("📄 Sheets found:", sheet_names)
-
-    if "Ownership" in sheet_names:
-        df_ownership = xl.parse("Ownership")
-        df_ownership['API14'] = clean_api14(df_ownership['API14'])
-        df_ownership[['WI', 'NRI']] = df_ownership[['WI', 'NRI']].apply(pd.to_numeric, errors='coerce')
-        print("✅ Loaded Ownership:", df_ownership.shape)
-
-    if "Strip" in sheet_names:
-        df_strip = xl.parse("Strip")
-        df_strip[['Year', 'Oil Price', 'Gas Price']] = df_strip[['Year', 'Oil Price', 'Gas Price']].apply(pd.to_numeric, errors='coerce')
-        df_strip = df_strip.sort_values("Year").reset_index(drop=True)
-        print("✅ Loaded Strip:", df_strip.shape)
-
-    if "Differentials" in sheet_names:
-        df_diff = xl.parse("Differentials")
-        df_diff['API14'] = clean_api14(df_diff['API14'])
-        df_diff[['Oil Diff', 'Gas Diff', 'NGL Diff']] = df_diff[['Oil Diff', 'Gas Diff', 'NGL Diff']].apply(pd.to_numeric, errors='coerce')
-        print("✅ Loaded Differentials:", df_diff.shape)
-
-    if "Expenses" in sheet_names:
-        df_opex = xl.parse("Expenses")
-        df_opex['API14'] = clean_api14(df_opex['API14'])
-        # ── Now also parse Water OpEx ──
-        df_opex[['OpEx', 'Oil OpEx', 'Gas OpEx', 'Water OpEx']] = (
-            df_opex[['OpEx', 'Oil OpEx', 'Gas OpEx', 'Water OpEx']]
-            .apply(pd.to_numeric, errors='coerce')
-        )
-        print("✅ Loaded Expenses:", df_opex.shape)
-
-    if "Capital" in sheet_names:
-        df_capex = xl.parse("Capital")
-        df_capex['API14'] = clean_api14(df_capex['API14'])
-        df_capex[['Capex', 'Abandonment Cost']] = df_capex[['Capex', 'Abandonment Cost']].apply(pd.to_numeric, errors='coerce')
-        print("✅ Loaded Capital:", df_capex.shape)
-
-# 📆 Effective date
-effective_date_str = "05.01.2025"
-effective_date = datetime.strptime(effective_date_str, "%m.%d.%Y")
-
-
-# 🎯 Minimal econ_params (no fallbacks — all data comes from Excel)
-econ_params = {
-    'Effective Date': effective_date,
-    'Discount Rate': 0.09,
-    'Severance Tax %': 0.06,
-    'Ad Valorem Tax %': 0.00,
-    'Client': "Schaper Energy Consulting LLC",
-    'Project': "Mineral Evaluation PV Tool",
-    'NGL Yield (bbl/MMcf)': 72,
-    'Shrink': 0.48
-}
-
-print("=== Loaded Overrides ===")
-for name, df in [
-    ("Ownership", df_ownership),
-    ("Strip",     df_strip),
-    ("Differentials", df_diff),
-    ("Expenses",  df_opex),
-    ("Capital",   df_capex)
-]:
-    if df is not None:
-        print(f"{name} ({df.shape}):")
-        display(df.head())
-    else:
-        print(f"{name}: None")
-
-"""# Economics Engine"""
-
 import numpy as np
-import pandas as pd
 import numpy_financial as npf
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from datetime import datetime
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 1. Compute Project IRR
-# ──────────────────────────────────────────────────────────────────────────────
+
+def clean_api14(series):
+    """
+    Removes any trailing '.0' from API14, pads/truncates to 14 chars, returns as string.
+    """
+    return series.apply(lambda x: str(x).split('.')[0]).astype(str)
+
+
 def compute_project_irr(cashflows, capex_upfront=None):
     """
     Computes project IRR (% annualized) using annual net cashflows.
@@ -132,44 +27,35 @@ def compute_project_irr(cashflows, capex_upfront=None):
         if capex_upfront is not None:
             cf = [capex_upfront] + cf
         if cf[0] >= 0:
-            return None
+            cf[0] = -cf[0]
         irr = npf.irr(cf)
-        return round(irr * 100, 2) if irr is not None and not np.isnan(irr) else None
-    except Exception as e:
-        print("[IRR Error]", e)
-        return None
+        return float(irr * 100)
+    except Exception:
+        return float('nan')
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 2. Build PV Summary (using end-of-period discounting and Free CF)
-# ──────────────────────────────────────────────────────────────────────────────
-def build_pv_summary(df, pv_rates=None):
-    pv_rates = pv_rates or [8, 9, 10, 12, 15, 20, 25, 30, 50]
-    lines = []
 
-    df = df.copy()
-    # Ensure 'Months' column exists
-    if 'Months' not in df.columns:
-        df['Months'] = (df['Date'].dt.to_period('M') - df['Date'].min().to_period('M')).apply(lambda x: x.n)
+def build_pv_summary(well_cashflows, discount_rates):
+    """
+    Given a DataFrame of well cashflows (with 'Months' and 'Free CF'),
+    computes PV at each discount rate in discount_rates list.
+    Returns a list of summary strings.
+    """
+    df = well_cashflows.copy()
+    df = df[['Months', 'Free CF']]
+    df['Months'] = df['Months'].astype(float)
+    df['Free CF'] = df['Free CF'].astype(float)
 
-    # Calculate Free CF (Revenue - OpEx - Capex - Taxes)
-    if 'Free CF' not in df.columns:
-        df['Free CF'] = df['Total Revenue'] - df['OpEx'] - df['Capex'] - df['Taxes']
+    summary = []
+    summary.append("Rate       PV (MM$)")
+    for rate in discount_rates:
+        df_rate = df.copy()
+        df_rate[f"DF_{rate}"] = (1 + rate / 100) ** (-(df_rate['Months'] / 12))
+        df_rate[f"PV{rate}"] = df_rate['Free CF'] * df_rate[f"DF_{rate}"]
+        val = df_rate[f"PV{rate}"].sum() / 1_000
+        summary.append(f"{rate:>6.2f}%   {val:>10.2f}")
+    return summary
 
-    for rate in pv_rates:
-        # End-of-period discount factor: (1 + rate/100) ^ -(Months/12)
-        df[f"DF_{rate}"] = (1 + rate / 100) ** (-(df['Months'] / 12))
 
-        # Use Free CF for PV calculation
-        df[f"PV{rate}"] = df['Free CF'] * df[f"DF_{rate}"]
-
-        val = df[f"PV{rate}"].sum() / 1_000  # Convert to M$
-        lines.append(f"{rate:>6.2f}           {val:>10.2f}")
-
-    return lines
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 3. Build Forecast Inputs
-# ──────────────────────────────────────────────────────────────────────────────
 def build_forecast_inputs(
     df_forecast,
     econ_params,
@@ -179,964 +65,258 @@ def build_forecast_inputs(
     df_capex=None
 ):
     """
-    Builds structured well-level inputs by merging forecast with economic overrides.
-
-    Parameters:
-        - df_forecast: monthly forecast (oil/gas)
-        - econ_params: dict of global settings (NGL yield, tax %, etc.)
-        - df_ownership: WI, NRI
-        - df_diff: oil/gas/NGL differentials
-        - df_opex: fixed + variable OpEx
-        - df_capex: initial + abandonment CapEx
-
-    Returns:
-        List[Dict] for each well (inputs to cashflow calc)
+    Merges forecast DataFrame with ownership, differential, OPEX, CAPEX overrides.
+    Returns a list of dicts per well containing all streams and parameters.
     """
-
-    ngl_yield = econ_params.get('NGL Yield (bbl/MMcf)', 2.5)
-
-    # Normalize all API14 values
-    df_forecast['API14'] = df_forecast['API14'].astype(str).str.strip()
-    for df_override in [df_ownership, df_diff, df_opex, df_capex]:
-        if df_override is not None:
-            df_override['API14'] = df_override['API14'].astype(str).str.strip()
-
-    # Merge all supplemental data
+    wells = []
     df = df_forecast.copy()
-    if df_ownership is not None:
-        df = df.merge(df_ownership, on="API14", how="left")
-    if df_diff is not None:
-        df = df.merge(df_diff, on="API14", how="left")
-    if df_opex is not None:
-        df = df.merge(df_opex, on="API14", how="left")
-    if df_capex is not None:
-        df = df.merge(df_capex, on="API14", how="left")
-
-    # Default values if missing
-    df['WI'] = df['WI'].fillna(econ_params.get('WI', 1.0))
-    df['NRI'] = df['NRI'].fillna(econ_params.get('NRI', 0.8))
-    df['Oil Diff'] = df['Oil Diff'].fillna(econ_params.get('Oil Diff', -3.0))
-    df['Gas Diff'] = df['Gas Diff'].fillna(econ_params.get('Gas Diff', 0.0))
-    df['NGL Diff'] = df['NGL Diff'].fillna(econ_params.get('NGL Diff', 0.3))
-    df['OpEx'] = df['OpEx'].fillna(0.0)
-    df['Oil OpEx'] = df['Oil OpEx'].fillna(0.0)
-    df['Gas OpEx'] = df['Gas OpEx'].fillna(0.0)
-    df['Water OpEx'] = df['Water OpEx'].fillna(0.0)
-    df['Capex'] = df['Capex'].fillna(0.0)
-    df['Abandonment Cost'] = df['Abandonment Cost'].fillna(0.0)
-
-    # Group by well and build structured inputs
-    well_forecasts = []
-    for api, group in df.groupby("API14"):
-        dates = pd.to_datetime(group['Date'])
-        oil_bbl = group['OilProduction_bbl_month']
-        gas_mcf = group['GasProduction_MCF_month']
-        ngl_bbl = gas_mcf * ngl_yield / 1000
-        water_bbl = group['WaterProduction_bbl_month']
-
-        row = group.iloc[0]  # use first row for static values
-
-        well_data = {
-            'API14': api,
-            'WellName': row['WellName'],
-            'Dates': dates.tolist(),
-            'Oil (bbl)': oil_bbl.tolist(),
-            'Gas (mcf)': gas_mcf.tolist(),
-            'NGL (bbl)': ngl_bbl.tolist(),
-            'Water (bbl)': water_bbl.tolist(),
-
-            'WI': row['WI'],
-            'NRI': row['NRI'],
-            'Oil Diff': row['Oil Diff'],
-            'Gas Diff': row['Gas Diff'],
-            'NGL Diff': row['NGL Diff'],
-
-            'OpEx': row['OpEx'],
-            'Oil OpEx': row['Oil OpEx'],
-            'Gas OpEx': row['Gas OpEx'],
-            'Water OpEx': row['Water OpEx'],
-
-            'Capex': row['Capex'],
-            'Abandonment Cost': row['Abandonment Cost'],
-
-            **econ_params
-        }
-
-        well_forecasts.append(well_data)
-
-    return well_forecasts
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 4. Calculate Cashflows (updated discounting and PV logic)
-# ──────────────────────────────────────────────────────────────────────────────
-def calculate_cashflows(well_forecasts, effective_date, discount_rate, df_strip=None):
-    effective_date = pd.to_datetime(effective_date)
-    well_cashflows = []
-    total_df = None
-
-    if df_strip is not None:
-        df_strip = df_strip.sort_values('Year')
-        strip_oil_last = df_strip['Oil Price'].iloc[-1]
-        strip_gas_last = df_strip['Gas Price'].iloc[-1]
-
-    for well in well_forecasts:
-        wi = well['WI']
-        nri = well['NRI']
-
-        oil_gross = np.array(well['Oil (bbl)'])
-        gas_gross = np.array(well['Gas (mcf)'])
-        ngl_gross = np.array(well.get('NGL (bbl)', [0.0] * len(well['Dates'])))
-        water_gross = np.array(well.get('Water (bbl)', [0.0] * len(well['Dates'])))
-
-        oil_net = oil_gross * nri
-        gas_net = gas_gross * nri
-        ngl_net = ngl_gross * nri
-
-        df = pd.DataFrame({
-            'Date': pd.to_datetime(well['Dates']),
-            'Oil Gross (bbl)': oil_gross,
-            'Gas Gross (mcf)': gas_gross,
-            'NGL Gross (bbl)': ngl_gross,
-            'Water Gross (bbl)': water_gross,
-            'Oil Net (bbl)': oil_net,
-            'Gas Net (mcf)': gas_net,
-            'NGL Net (bbl)': ngl_net
-        })
-
-        # Calculate 'Months' relative to effective_date
-        df['Months'] = (df['Date'].dt.to_period('M') - effective_date.to_period('M')).apply(lambda x: x.n)
-        df = df[df['Months'] >= 0]
-        df['Year'] = df['Date'].dt.year
-
-        # Apply strip prices with differentials
-        if df_strip is not None:
-            df = df.merge(df_strip, on='Year', how='left')
-            df['Oil Price'] = df['Oil Price'].fillna(strip_oil_last) + well['Oil Diff']
-            df['Gas Price'] = df['Gas Price'].fillna(strip_gas_last) + well['Gas Diff']
-        else:
-            df['Oil Price'] = well.get('Oil Price', 70.0) + well['Oil Diff']
-            df['Gas Price'] = well.get('Gas Price', 3.0) + well['Gas Diff']
-
-        df['NGL Price'] = df['Oil Price'] * well['NGL Diff']
-
-        # Revenue calculations (net to working interest owner)
-        df['Oil Revenue'] = df['Oil Net (bbl)'] * df['Oil Price']
-        df['Gas Revenue'] = df['Gas Net (mcf)'] * df['Gas Price']
-        df['NGL Revenue'] = df['NGL Net (bbl)'] * df['NGL Price']
-
-        # Effective prices (if no production, remain NaN)
-        df['Eff Oil Price'] = df['Oil Revenue'] / df['Oil Net (bbl)'].replace(0, pd.NA)
-        df['Eff Gas Price'] = df['Gas Revenue'] / df['Gas Net (mcf)'].replace(0, pd.NA)
-        df['Eff NGL Price'] = df['NGL Revenue'] / df['NGL Net (bbl)'].replace(0, pd.NA)
-
-        # Total Revenue (sum of net revenues)
-        df['Total Revenue'] = df['Oil Revenue'] + df['Gas Revenue'] + df['NGL Revenue']
-
-        # Taxes (apply to net revenue; severance + ad valorem)
-        df['Taxes'] = df['Total Revenue'] * (well.get('Severance Tax %', 0.0) + well.get('Ad Valorem Tax %', 0.0))
-
-        # OpEx (multiplied by WI)
-        df['OpEx'] = (
-            well.get('OpEx', 0.0) * wi +
-            df['Oil Gross (bbl)'] * well.get('Oil OpEx', 0.0) * wi +
-            df['Gas Gross (mcf)'] * well.get('Gas OpEx', 0.0) * wi +
-            df['Water Gross (bbl)'] * well.get('Water OpEx', 0.0) * wi
-        )
-
-        # CapEx (initial at Months == 0; abandonment at last)
-        df['Capex'] = 0.0
-        if not df.empty:
-            df.loc[df['Months'] == 0, 'Capex'] = well.get('Capex', 0.0) * wi
-            df.iloc[-1, df.columns.get_loc('Capex')] += well.get('Abandonment Cost', 0.0) * wi
-
-        # Free Cash Flow = Revenue - OpEx - CapEx - Taxes
-        df['Free CF'] = df['Total Revenue'] - df['OpEx'] - df['Capex'] - df['Taxes']
-
-        # Discount Factor: end-of-period (Months/12)
-        df['Discount Factor'] = (1 + discount_rate) ** (-(df['Months'] / 12))
-        # Discounted CF: uses Free CF
-        df['Discounted CF'] = df['Free CF'] * df['Discount Factor']
-
-        # Store ownership columns
-        df['API14'] = well['API14']
-        df['WellName'] = well['WellName']
-        df['WI'] = wi
-        df['NRI'] = nri
-
-        well_cashflows.append(df)
-        total_df = pd.concat([total_df, df]) if total_df is not None else df.copy()
-
-    # Aggregate total cashflows for project
-    total_cashflow = total_df.groupby('Date', as_index=False).agg({
-        'Free CF': 'sum',
-        'Discounted CF': 'sum'
-    })
-
-    return well_cashflows, total_cashflow
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 5. Get Aries-style Summary Text (with fixed IRR and payout)
-# ──────────────────────────────────────────────────────────────────────────────
-def get_aries_summary_text(df, meta):
-    """
-    Generates an Aries-style economic summary for a DataFrame of monthly cashflows.
-
-    Updates:
-      - IRR: uses proper CF0 as -initial CapEx and sums subsequent years correctly.
-      - Payout: uses undiscounted cumulative Net CF (including CF0).
-      - Discounting: matches end-of-period convention for PV lines.
-    """
-    df = df.copy()
-    df['Months'] = df['Months'].fillna(0)
-    df['Oil Gross (bbl)'] = df.get('Oil Gross (bbl)', 0)
-    df['Gas Gross (mcf)'] = df.get('Gas Gross (mcf)', 0)
-    df['Water Gross (bbl)'] = df.get('Water Gross (bbl)', 0)
-    df['Oil Net (bbl)'] = df.get('Oil Net (bbl)', 0)
-    df['Gas Net (mcf)'] = df.get('Gas Net (mcf)', 0)
-    df['Eff Oil Price'] = df.get('Eff Oil Price', 0)
-    df['Eff Gas Price'] = df.get('Eff Gas Price', 0)
-    df['Eff NGL Price'] = df.get('Eff NGL Price', 0)
-
-    wi = meta.get('WI', 1.0)
-    nri = meta.get('NRI', 0.75)
-
-    # Summed totals (units in Mbbl or MMcf)
-    gross_oil = df['Oil Gross (bbl)'].sum() / 1000
-    gross_gas = df['Gas Gross (mcf)'].sum() / 1000
-    gross_water = df['Water Gross (bbl)'].sum() / 1000
-    net_oil = df['Oil Net (bbl)'].sum() / 1000
-    net_gas = df['Gas Net (mcf)'].sum() / 1000
-
-    # Build Net CF series (month-level)
-    df['Net CF'] = df['Free CF']
-    # Identify initial CapEx (at Months == 0)
-    initial_capex = 0.0
-    if (df['Months'] == 0).any():
-        initial_capex = df.loc[df['Months'] == 0, 'Capex'].sum()
-        # Subtract initial CapEx from month0 Net CF
-        df.loc[df['Months'] == 0, 'Net CF'] = df.loc[df['Months'] == 0, 'Net CF'] - initial_capex
-
-    # Annual grouping: define YearIdx = floor(Months/12)
-    df['YearIdx'] = (df['Months'] / 12).apply(lambda x: int(np.floor(x)))
-
-    # Build cashflow list for IRR: CF0 = -initial_capex, then year1..year20 sums
-    cf_list = [-initial_capex]
-    for year in range(1, 21):  # 20-year horizon
-        yearly_sum = df[df['YearIdx'] == year]['Net CF'].sum()
-        cf_list.append(yearly_sum)
-
-    # Compute IRR if CF0 is negative
-    if cf_list[0] < 0:
-        try:
-            irr_val = npf.irr(cf_list)
-            irr = round(irr_val * 100, 2) if irr_val is not None and not np.isnan(irr_val) else None
-        except:
-            irr = None
-    else:
-        irr = None
-
-    irr_line = f"RATE-OF-RETURN %   {irr:>12.2f}" if irr is not None else "RATE-OF-RETURN %       N/A"
-
-    # Payout (undiscounted breakeven)
-    df['Cum Net CF'] = df['Net CF'].cumsum()
-    payout_month = df[df['Cum Net CF'] >= 0]['Months'].min()
-    if pd.notnull(payout_month):
-        payout_yrs = round(payout_month / 12, 2)
-        payout_line = f"PAYOUT TIME, YRS.   {payout_yrs:>10.2f}"
-    else:
-        payout_line = "PAYOUT TIME, YRS.       N/A"
-
-    # PV lines using revised build_pv_summary logic
-    pv_lines = build_pv_summary(df)
-
-    # Display lines
-    left_col = [
-        f"GROSS WELLS         {1.0:>10.2f}",
-        f"GROSS RES., MB      {gross_oil:>10.2f}",
-        f"NET RES., MB        {net_oil:>10.2f}",
-        f"INITIAL N.R.I., %   {nri:>10.2f}",
-    ]
-    right_col = [
-        f"GROSS WELLS         {0.0:>10.2f}",
-        f"GROSS RES., MMcf    {gross_gas:>10.2f}",
-        f"NET RES., MMcf      {net_gas:>10.2f}",
-        f"INITIAL W.I., %     {wi:>10.2f}",
-    ]
-    water_col = [
-        f"GROSS WELLS         {0.0:>10.2f}",
-        f"GROSS WATER, MB     {gross_water:>10.2f}",
-        f"NET RES., MB        {0.0:>10.2f}",
-        "                  "
-    ]
-
-    lines = []
-    lines.append(f"{'':<20}        OIL              GAS             WATER")
-    lines.extend([f"{l}    {r}    {w}" for l, r, w in zip(left_col, right_col, water_col)])
-
-    # Life (years)
-    try:
-        low_start = df['Date'].min()
-        low_end = df['Date'].max()
-        duration_months = ((low_end.to_period("M") - low_start.to_period("M")).n + 1)
-        duration_years = round(duration_months / 12, 2)
-        low_line = f"LIFE YRS          {duration_years:>12.2f}"
-    except:
-        low_line = "LIFE YRS               N/A"
-
-    lines.append(low_line)
-    lines.append(irr_line)
-    lines.append(payout_line)
-    lines.append("")
-    lines.append(" P.W. %            P.W., M$")
-    lines.extend(pv_lines)
-    lines.append("")
-
-    return "\n".join(lines)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 6. Summarize Yearly (monthly to annual aggregates)
-# ──────────────────────────────────────────────────────────────────────────────
-def summarize_yearly(df):
-    df = df.copy()
-    df['Year'] = df['Date'].dt.year
-    df['Month'] = df['Date'].dt.month
-    df['is_dec'] = df['Month'] == 12
-    df['Total Revenue'] = df[['Oil Revenue', 'Gas Revenue', 'NGL Revenue']].sum(axis=1)
-    df['Free CF'] = df['Total Revenue'] - df['Taxes'] - df['OpEx'] - df['Capex']
-    return df.groupby('Year', as_index=False).agg({
-        'Oil Gross (bbl)': 'sum',
-        'Gas Gross (mcf)': 'sum',
-        'NGL Gross (bbl)': 'sum',
-        'Water Gross (bbl)': 'sum',
-        'Oil Net (bbl)': 'sum',
-        'Gas Net (mcf)': 'sum',
-        'NGL Net (bbl)': 'sum',
-        'Eff Oil Price': 'mean',
-        'Eff Gas Price': 'mean',
-        'Eff NGL Price': 'mean',
-        'Total Revenue': 'sum',
-        'Taxes': 'sum',
-        'OpEx': 'sum',
-        'Capex': 'sum',
-        'Free CF': 'sum',
-        'Discounted CF': 'sum',
-        'is_dec': 'max'
-    })
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 7. Render Cashflow Page (annual summary)
-# ──────────────────────────────────────────────────────────────────────────────
-def render_cashflow_page(title, df_yearly, raw_df, pdf, page_num,
-                         fontname, effective_date_str,
-                         client_name, project_name,
-                         pv_label,
-                         get_aries_summary_text):
-    headers = [
-        "Year", "Oil Gross", "Gas Gross", "NGL Gross", "Water Gross",
-        "Oil Net", "Gas Net", "NGL Net",
-        "Oil $", "Gas $", "NGL $",
-        "Total Rev", "Taxes", "OpEx", "Capex", "Free CF", "Disc CF"
-    ]
-    units = [
-        "     ", "(Mbbl)", "(MMcf)", "(Mbbl)", "(Mbbl)",
-        "(Mbbl)", "(MMcf)", "(Mbbl)",
-        "($/bbl)", "($/mcf)", "($/bbl)",
-        "(M$)", "(M$)", "(M$)", "(M$)", "(M$)", "(M$)"
-    ]
-    col_widths = [9, 10, 10, 10, 10, 10, 10, 10, 8, 8, 8, 11, 8, 8, 8, 11, 11]
-
-    def fmt(val, scale=1_000):
-        return f"{val/scale:,.2f}" if pd.notnull(val) else "   -   "
-
-    def fmt_price(val):
-        return f"{val:,.2f}" if pd.notnull(val) else "   -   "
-
-    def format_row(values, widths):
-        return " ".join(str(val).rjust(w) for val, w in zip(values, widths))
-
-    df_detail = df_yearly[(df_yearly['is_dec']) & (df_yearly['Year'] <= pd.to_datetime(effective_date_str).year + 19)].copy()
-    total_row = df_yearly.sum(numeric_only=True)
-
-    fig, ax = plt.subplots(figsize=(15, 0.6 + 0.25 * (len(df_detail) + 6)))
-    ax.axis("off")
-
-    ax.text(0.5, 1.06, "Schaper Energy Economics Engine", ha='center', va='bottom', fontsize=12, fontweight='bold', fontname=fontname, transform=ax.transAxes)
-    ax.text(0.5, 1.03, f"Effective Date: {effective_date_str}", ha='center', va='bottom', fontsize=10, fontname=fontname, transform=ax.transAxes)
-    ax.text(0.5, 1.00, f"Client: {client_name}", ha='center', va='bottom', fontsize=10, fontname=fontname, transform=ax.transAxes)
-    ax.text(0.5, 0.975, f"Project: {project_name} | {pv_label}", ha='center', va='bottom', fontsize=10, fontname=fontname, transform=ax.transAxes)
-
-    lines = [title]
-    lines.append(format_row(headers, col_widths))
-    lines.append(format_row(units, col_widths))
-
-    for _, r in df_detail.iterrows():
-        row = [
-            int(r['Year']),
-            fmt(r['Oil Gross (bbl)']), fmt(r['Gas Gross (mcf)']), fmt(r['NGL Gross (bbl)']), fmt(r.get('Water Gross (bbl)', 0.0)),
-            fmt(r['Oil Net (bbl)']), fmt(r['Gas Net (mcf)']), fmt(r['NGL Net (bbl)']),
-            fmt_price(r['Eff Oil Price']), fmt_price(r['Eff Gas Price']), fmt_price(r['Eff NGL Price']),
-            fmt(r['Total Revenue']), fmt(r['Taxes']), fmt(r['OpEx']), fmt(r['Capex']),
-            fmt(r['Free CF']), fmt(r['Discounted CF'])
-        ]
-        lines.append(format_row(row, col_widths))
-
-    total_row_fmt = [
-        "TOTAL",
-        fmt(total_row['Oil Gross (bbl)']), fmt(total_row['Gas Gross (mcf)']), fmt(total_row['NGL Gross (bbl)']), fmt(total_row.get('Water Gross (bbl)', 0.0)),
-        fmt(total_row['Oil Net (bbl)']), fmt(total_row['Gas Net (mcf)']), fmt(total_row['NGL Net (bbl)']),
-        "", "", "",
-        fmt(total_row['Total Revenue']), fmt(total_row['Taxes']), fmt(total_row['OpEx']), fmt(total_row['Capex']),
-        fmt(total_row['Free CF']), fmt(total_row['Discounted CF'])
-    ]
-    lines.append(format_row(total_row_fmt, col_widths))
-
-    wi = raw_df['WI'].iloc[0] if 'WI' in raw_df.columns else 1.0
-    nri = raw_df['NRI'].iloc[0] if 'NRI' in raw_df.columns else 0.75
-    summary_text = get_aries_summary_text(raw_df, {'WI': wi, 'NRI': nri})
-
-    ax.text(0, 0.94, "\n".join(lines), va='top', ha='left', fontname=fontname, fontsize=7, transform=ax.transAxes)
-    ax.text(0.01, 0.02, summary_text, fontname=fontname, fontsize=7, transform=ax.transAxes, ha='left', va='bottom')
-    ax.text(0.5, 0.01, f"Page {page_num}", ha='center', va='bottom', fontsize=8, fontname=fontname, transform=ax.transAxes)
-
-    pdf.savefig(fig)
-    plt.close(fig)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 8. Generate Cashflow PDF Table (project and per-well summaries)
-# ──────────────────────────────────────────────────────────────────────────────
-def generate_cashflow_pdf_table(well_cashflows, total_cashflow_df, econ_params, output_path="Cashflow_Report.pdf"):
-    fontname = 'monospace'
-    effective_date = pd.to_datetime(econ_params['Effective Date'])
-    effective_year = effective_date.year
-    discount_rate = econ_params.get("Discount Rate", 0.10)
-    client_name = econ_params.get("Client", "")
-    project_name = econ_params.get("Project", "")
-    pv_label = f"PV{int(discount_rate * 100)}"
-    last_detail_year = effective_year + 19
-    final_agg_year = effective_year + 49
-
-    npv_list = []
-    for df in well_cashflows:
-        well_name = df['WellName'].iloc[0]
-        well_api = df['API14'].iloc[0]
-        yearly = summarize_yearly(df)
-        total_npv = yearly[yearly['Year'] <= final_agg_year]['Discounted CF'].sum()
-        npv_list.append((well_name, well_api, total_npv))
-
-    sorted_wells = sorted(npv_list, key=lambda x: x[2], reverse=True)
-
-    with PdfPages(output_path) as pdf:
-        page_num = 1
-        all_data = pd.concat(well_cashflows, ignore_index=True)
-
-        # Ensure Water is handled
-        if 'Water Gross (bbl)' not in all_data.columns:
-            all_data['Water Gross (bbl)'] = 0.0
-
-        all_data['Months'] = (all_data['Date'].dt.to_period('M') - effective_date.to_period('M')).apply(lambda x: x.n)
-        all_data['Free CF'] = all_data['Total Revenue'] - all_data['OpEx'] - all_data['Capex'] - all_data['Taxes']
-        all_data['Discount Factor'] = (1 + discount_rate) ** (-(all_data['Months'] / 12))
-        all_data['Discounted CF'] = all_data['Free CF'] * all_data['Discount Factor']
-
-        proj_yearly = summarize_yearly(all_data)
-        render_cashflow_page(
-            title="Total Project Cashflow Summary",
-            df_yearly=proj_yearly,
-            raw_df=all_data,
-            pdf=pdf,
-            page_num=page_num,
-            fontname=fontname,
-            effective_date_str=effective_date.strftime('%B %d, %Y'),
-            client_name=client_name,
-            project_name=project_name,
-            pv_label=pv_label,
-            get_aries_summary_text=get_aries_summary_text
-        )
-        page_num += 1
-
-        for well_name, well_api, _ in sorted_wells:
-            df = next(df for df in well_cashflows if df['API14'].iloc[0] == well_api)
-            yearly = summarize_yearly(df)
-            render_cashflow_page(
-                title=f"Cashflow Summary for {well_name} (API: {well_api})",
-                df_yearly=yearly,
-                raw_df=df,
-                pdf=pdf,
-                page_num=page_num,
-                fontname=fontname,
-                effective_date_str=effective_date.strftime('%B %d, %Y'),
-                client_name=client_name,
-                project_name=project_name,
-                pv_label=pv_label,
-                get_aries_summary_text=get_aries_summary_text
-            )
-            page_num += 1
-
-    return output_path
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 9. Render Mixed Table for Monthly & Annual (updated discounting & Free CF)
-# ──────────────────────────────────────────────────────────────────────────────
-def render_mixed_table(df_mon, df_ann, df_full, df_yr, title, pdf, pg, wi=1.0, nri=0.75,
-                       client_name="TBD", project_name="TBD", pv_label="PVXX"):
-    df_mon = df_mon.copy()
-    df_ann = df_ann.copy()
-    df_full = df_full.copy()
-    df_yr = df_yr.copy()
-
-    df_mon['Label'] = df_mon['Date'].dt.strftime("%b %Y").str.rjust(9)
-    df_ann['Label'] = df_ann['Year'].astype(str).str.rjust(9)
-    combined = pd.concat([df_mon, df_ann], ignore_index=True)
-
-    total = df_full.drop(columns=['Date', 'Year', 'Month', 'is_dec', 'Label'], errors='ignore')\
-                   .sum(numeric_only=True)
-    total['Label'] = 'TOTAL'.rjust(9)
-
-    fig, ax = plt.subplots(figsize=(15, 0.5 + 0.22 * (len(combined) + 6)))
-    ax.axis("off")
-
-    ax.text(0.5, 1.06, "Schaper Energy Economics Engine", ha='center', va='bottom',
-            fontsize=11, fontweight='bold', fontname='monospace', transform=ax.transAxes)
-    ax.text(0.5, 1.03, f"Effective Date: {df_full['Date'].min():%B %d, %Y}", ha='center', va='bottom',
-            fontsize=9, fontname='monospace', transform=ax.transAxes)
-    ax.text(0.5, 1.00, f"Client: {client_name}", ha='center', va='bottom',
-            fontsize=9, fontname='monospace', transform=ax.transAxes)
-    ax.text(0.5, 0.975, f"Project: {project_name} | {pv_label}", ha='center', va='bottom',
-            fontsize=9, fontname='monospace', transform=ax.transAxes)
-
-    headers = [
-        "Year", "Oil Gross", "Gas Gross", "NGL Gross", "Water Gross",
-        "Oil Net", "Gas Net", "NGL Net",
-        "Oil $", "Gas $", "NGL $",
-        "Total Rev", "Taxes", "OpEx", "Capex", "Free CF", "Disc CF"
-    ]
-    units = [
-        "     ", "(Mbbl)", "(MMcf)", "(Mbbl)", "(Mbbl)",
-        "(Mbbl)", "(MMcf)", "(Mbbl)",
-        "($/bbl)", "($/mcf)", "($/bbl)",
-        "(M$)", "(M$)", "(M$)", "(M$)", "(M$)", "(M$)"
-    ]
-    col_w = [9, 10, 10, 10, 10, 10, 10, 10, 8, 8, 8, 11, 8, 8, 8, 11, 11]
-
-    def fmt(val, scale=1_000):
-        return f"{val / scale:,.2f}" if pd.notnull(val) else "   -   "
-
-    def fmt_price(val):
-        return f"{val:,.2f}" if pd.notnull(val) else "   -   "
-
-    def format_row(vals, widths):
-        return " ".join(str(v).rjust(w) for v, w in zip(vals, widths))
-
-    lines = [f"Cashflow Summary for {title}",
-             format_row(headers, col_w),
-             format_row(units, col_w)]
-
-    for _, r in combined.iterrows():
-        row = [
-            r['Label'],
-            fmt(r['Oil Gross (bbl)']), fmt(r['Gas Gross (mcf)']), fmt(r['NGL Gross (bbl)']), fmt(r.get('Water Gross (bbl)', 0.0)),
-            fmt(r['Oil Net (bbl)']), fmt(r['Gas Net (mcf)']), fmt(r['NGL Net (bbl)']),
-            fmt_price(r['Eff Oil Price']), fmt_price(r['Eff Gas Price']), fmt_price(r['Eff NGL Price']),
-            fmt(r['Total Revenue']), fmt(r['Taxes']), fmt(r['OpEx']), fmt(r['Capex']),
-            fmt(r['Free CF']), fmt(r['Discounted CF'])
-        ]
-        lines.append(format_row(row, col_w))
-
-    total_row = [
-        total['Label'],
-        fmt(total['Oil Gross (bbl)']), fmt(total['Gas Gross (mcf)']), fmt(total['NGL Gross (bbl)']), fmt(total.get('Water Gross (bbl)', 0.0)),
-        fmt(total['Oil Net (bbl)']), fmt(total['Gas Net (mcf)']), fmt(total['NGL Net (bbl)']),
-        "", "", "",
-        fmt(total['Total Revenue']), fmt(total['Taxes']), fmt(total['OpEx']), fmt(total['Capex']),
-        fmt(total['Free CF']), fmt(total['Discounted CF'])
-    ]
-    lines.append(format_row(total_row, col_w))
-
-    summary = get_aries_summary_text(df_full, {'WI': wi, 'NRI': nri})
-    ax.text(0, 0.94, "\n".join(lines), va='top', ha='left', fontname='monospace', fontsize=7, transform=ax.transAxes)
-    ax.text(0.01, 0.02, summary, fontname='monospace', fontsize=7, transform=ax.transAxes, ha='left', va='bottom')
-    ax.text(0.5, 0.01, f"Page {pg}", ha='center', va='bottom', fontsize=8, fontname='monospace', transform=ax.transAxes)
-
-    pdf.savefig(fig)
-    plt.close(fig)
-
-# ──────────────────────────────────────────────────────────────────────────────
-# 10. Generate Cashflow PDF Table with Monthly View
-# ──────────────────────────────────────────────────────────────────────────────
-def generate_cashflow_pdf_table_with_monthly(
-    well_cashflows,
-    total_cashflow_df,
-    econ_params,
-    output_path="Cashflow_Report_Monthly.pdf",
-    get_aries_summary_text=None
+    df['API14'] = clean_api14(df['API14'])
+    grouped = df.groupby('API14')
+
+    for api, sub in grouped:
+        w = {'API14': api}
+        w['WellName'] = sub['WellName'].iloc[0]
+        w['WI'] = econ_params.get('WI', 1.0)
+        w['NRI'] = econ_params.get('NRI', 1.0)
+
+        if df_ownership is not None:
+            tmp = df_ownership[df_ownership['API14'] == api]
+            if not tmp.empty:
+                w['WI'] = tmp['WI'].iloc[0]
+                w['NRI'] = tmp['NRI'].iloc[0]
+
+        oil = sub[['Year', 'Mo', 'Oil (bbl)']].reset_index(drop=True)
+        gas = sub[['Year', 'Mo', 'Gas (mcf)']].reset_index(drop=True)
+        ngl = sub[['Year', 'Mo', 'NGL (bbl)']].reset_index(drop=True)
+
+        w['Oil (bbl)'] = oil['Oil (bbl)'] * w['WI'] * w['NRI']
+        w['Gas (mcf)'] = gas['Gas (mcf)'] * w['WI'] * w['NRI']
+        w['NGL (bbl)'] = ngl['NGL (bbl)'] * w['WI'] * w['NRI']
+
+        # Apply differentials
+        if df_diff is not None:
+            tmp = df_diff[df_diff['API14'] == api]
+            if not tmp.empty:
+                w['Gas Price'] = tmp['Gas Price'].iloc[0]
+                w['Oil Price'] = tmp['Oil Price'].iloc[0]
+        # Defaults from econ_params
+        w['Gas Price'] = w.get('Gas Price', econ_params.get('Gas Price', 0.0))
+        w['Oil Price'] = w.get('Oil Price', econ_params.get('Oil Price', 0.0))
+        w['NGL Yield'] = econ_params.get('NGL Yield (bbl/MMcf)', 0.0)
+        w['Shrink'] = econ_params.get('Shrink', 1.0)
+
+        # Opex & Capex
+        w['OpEx'] = 0.0
+        if df_opex is not None:
+            tmp = df_opex[df_opex['API14'] == api]
+            if not tmp.empty:
+                w['OpEx'] = tmp['OpEx'].iloc[0]
+        w['CapEx'] = 0.0
+        if df_capex is not None:
+            tmp = df_capex[df_capex['API14'] == api]
+            if not tmp.empty:
+                w['CapEx'] = tmp['CapEx'].iloc[0]
+
+        wells.append(w)
+    return wells
+
+
+def calculate_cashflows(
+    well_forecasts,
+    effective_date,
+    discount_rate,
+    df_strip=None
 ):
-    fontname = 'monospace'
-    effective_date = pd.to_datetime(econ_params['Effective Date'])
-    discount_rate = econ_params['Discount Rate']
-    client_name = econ_params.get('Client', 'TBD')
-    project_name = econ_params.get('Project', 'TBD')
-    pv_label = f"PV{int(discount_rate * 100)}"
-    summary_end_y = effective_date.year + 19
+    """
+    From list of well dicts, builds detailed monthly cashflows,
+    applies strip pricing, discounting, and returns:
+      - list of well DataFrames (with Months, Free CF, etc.)
+      - total aggregated cashflow DataFrame
+    """
+    all_wells = []
+    combined = []
+    if df_strip is not None:
+        df_strip = df_strip.sort_values('Year').reset_index(drop=True)
+        last_oil = df_strip['Oil Price'].iloc[-1]
+        last_gas = df_strip['Gas Price'].iloc[-1]
 
+    for w in well_forecasts:
+        months = len(w['Oil (bbl)'])
+        df = pd.DataFrame({
+            'Months': np.arange(months, dtype=float),
+            'Oil': w['Oil (bbl)'],
+            'Gas': w['Gas (mcf)'],
+            'NGL': w['NGL (bbl)'],
+        })
+        # Pricing
+        df['Oil Price'] = w['Oil Price']
+        df['Gas Price'] = w['Gas Price']
+        # Override with strip if before strip end
+        if df_strip is not None:
+            years = (effective_date.year + (df['Months'] / 12)).astype(int)
+            df = df.merge(df_strip, left_on='Year', right_on='Year', how='left', suffixes=('', '_strip'))
+            df['Oil Price'] = df['Oil Price_strip'].fillna(w['Oil Price'])
+            df['Gas Price'] = df['Gas Price_strip'].fillna(w['Gas Price'])
+
+        # Revenues & opex
+        df['Oil Rev'] = df['Oil'] * df['Oil Price']
+        df['Gas Rev'] = df['Gas'] * df['Gas Price']
+        df['NGL Rev'] = df['NGL'] * w['NGL Yield'] * df['Gas'] * w['Shrink']
+
+        df['Total Rev'] = df['Oil Rev'] + df['Gas Rev'] + df['NGL Rev']
+        df['OpEx'] = w['OpEx']
+        df['CapEx'] = 0.0
+        df.loc[0, 'CapEx'] = w['CapEx']
+
+        # Free CF before tax
+        df['Free CF'] = df['Total Rev'] - df['OpEx'] - df['CapEx']
+
+        # Discount factor
+        df['DF'] = (1 + discount_rate) ** (-(df['Months'] / 12))
+        df['Disc CF'] = df['Free CF'] * df['DF']
+
+        df['API14'] = w['API14']
+        df['WellName'] = w['WellName']
+        all_wells.append(df)
+        combined.append(df)
+
+    total = pd.concat(combined, ignore_index=True)
+    return all_wells, total
+
+
+def get_aries_summary_text(total_cashflow, discount_rate):
+    """
+    Builds an Aries‐style summary paragraph based on total cashflow DataFrame.
+    """
+    # Example: summarize NPV10, NPV0, IRR, Payback, etc.
+    npv10 = total_cashflow['Disc CF'].sum() / 1_000
+    irr = compute_project_irr(
+        total_cashflow['Free CF'].resample('A', on='Date').sum().values,
+        capex_upfront=None
+    )
+    return f"NPV@{discount_rate*100:.0f}%: ${npv10:,.1f}M, IRR: {irr:.1f}%"
+
+
+def summarize_yearly(total_cashflow):
+    """
+    Returns a pivot table of yearly cashflows.
+    """
+    total_cashflow['Year'] = total_cashflow['Date'].dt.year
+    yearly = total_cashflow.groupby('Year')['Free CF'].sum().reset_index()
+    yearly.columns = ['Year', 'Annual CF']
+    return yearly
+
+
+def render_cashflow_page(pdf: PdfPages, df, title):
+    """
+    Renders a matplotlib table into the PdfPages object.
+    """
+    fig, ax = plt.subplots(figsize=(8, len(df)*0.25 + 1))
+    ax.axis('off')
+    tbl = ax.table(cellText=df.values, colLabels=df.columns, loc='center')
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(8)
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+def generate_cashflow_pdf_table(
+    well_cashflows, total_cashflow, econ_params, output_path
+):
+    """
+    Generates a yearly cashflow PDF (aggregate).
+    """
+    yearly = summarize_yearly(total_cashflow)
     with PdfPages(output_path) as pdf:
-        # Merge all wells and calculate cash flow metrics
-        all_data = pd.concat(well_cashflows)
-        all_data['Months'] = (all_data['Date'].dt.to_period('M') - effective_date.to_period('M')).apply(lambda x: x.n)
-        all_data['Total Revenue'] = all_data[['Oil Revenue', 'Gas Revenue', 'NGL Revenue']].sum(axis=1)
-
-        # For summary display (Free CF includes taxes)
-        all_data['Free CF'] = all_data['Total Revenue'] - all_data['OpEx'] - all_data['Capex'] - all_data['Taxes']
-
-        # For PV calculations (Discounted CF uses Free CF and end-of-period)
-        all_data['Discount Factor'] = (1 + discount_rate)**(-(all_data['Months'] / 12))
-        all_data['Discounted CF'] = all_data['Free CF'] * all_data['Discount Factor']
-
-        # Summaries
-        monthly = all_data[all_data['Months'] < 12].groupby('Date', as_index=False).sum(numeric_only=True)
-        yearly = summarize_yearly(all_data)
-        annual = yearly[(yearly['Year'] > effective_date.year) & (yearly['Year'] <= summary_end_y) & (yearly['is_dec'])]
-
-        # Project-level PDF page
-        pg = 1
-        render_mixed_table(
-            monthly, annual, all_data, yearly,
-            "PROJECT TOTAL", pdf, pg,
-            client_name=client_name,
-            project_name=project_name,
-            pv_label=pv_label
-        )
-        pg += 1
-
-        # One page per well, sorted by NPV
-        npv_list = [(df['WellName'].iloc[0], df['API14'].iloc[0], df['Discounted CF'].sum()) for df in well_cashflows]
-        for name, api, _ in sorted(npv_list, key=lambda x: x[2], reverse=True):
-            df = next(d for d in well_cashflows if d['API14'].iloc[0] == api).copy()
-            wi = df['WI'].iloc[0]
-            nri = df['NRI'].iloc[0]
-
-            df['Months'] = (df['Date'].dt.to_period('M') - effective_date.to_period('M')).apply(lambda x: x.n)
-            df['Total Revenue'] = df[['Oil Revenue', 'Gas Revenue', 'NGL Revenue']].sum(axis=1)
-            df['Free CF'] = df['Total Revenue'] - df['OpEx'] - df['Capex'] - df['Taxes']
-            df['Discount Factor'] = (1 + discount_rate)**(-(df['Months'] / 12))
-            df['Discounted CF'] = df['Free CF'] * df['Discount Factor']
-
-            month = df[df['Months'] < 12].groupby('Date', as_index=False).sum(numeric_only=True)
-            yrly = summarize_yearly(df)
-            ann = yrly[(yrly['Year'] > effective_date.year) & (yrly['Year'] <= summary_end_y) & (yrly['is_dec'])]
-
-            render_mixed_table(
-                month, ann, df, yrly,
-                f"{name} (API: {api})", pdf, pg, wi, nri,
-                client_name=client_name,
-                project_name=project_name,
-                pv_label=pv_label
-            )
-            pg += 1
-
-    return output_path
-
-"""# Run Yearly Enconomics"""
-
-from datetime import datetime
-# 🧠 Build well-level forecasts
-well_forecasts = build_forecast_inputs(
-    df_forecast,
-    econ_params,
-    df_ownership=df_ownership,
-    df_diff=df_diff,
-    df_opex=df_opex,
-    df_capex=df_capex
-)
-
-# 📈 Calculate cashflows
-if use_custom_excel and df_strip is not None:
-    well_cashflows, total_cashflow = calculate_cashflows(
-        well_forecasts,
-        effective_date=econ_params['Effective Date'],
-        discount_rate=econ_params['Discount Rate'],
-        df_strip=df_strip
-    )
-else:
-    well_cashflows, total_cashflow = calculate_cashflows(
-        well_forecasts,
-        effective_date=econ_params['Effective Date'],
-        discount_rate=econ_params['Discount Rate']
-    )
-
-# 📄 Generate Yearly PDF with Aries Summary (including IRR)
-# 🗓 Format today's date as "Apr-23-2025"
-today_str = datetime.today().strftime('%m.%d.%Y')
-# 👤 Safely extract client name
-client_name_safe = econ_params.get('Client', 'UnknownClient')
-# 🧾 Final filename
-output_pdf_path = f"SE_Economics_{client_name_safe}_Prelim Cashflow {today_str}.pdf"
-generate_cashflow_pdf_table(well_cashflows, total_cashflow, econ_params, output_pdf_path)
-
-# 📥 Download the report
-from google.colab import files
-files.download(output_pdf_path)
-
-"""# Run Monthly Economics"""
-
-from datetime import datetime
-# ✅ Ensure API14 is standardized
-df_forecast['API14'] = df_forecast['API14'].astype(str).str.strip()
-
-# 🧠 Build full well-level forecast input
-well_forecasts = build_forecast_inputs(
-    df_forecast,
-    econ_params,
-    df_ownership=df_ownership,
-    df_diff=df_diff,
-    df_opex=df_opex,
-    df_capex=df_capex
-)
-
-# 📈 Calculate cashflows with strip pricing if provided
-if use_custom_excel and df_strip is not None:
-    well_cashflows, total_cashflow = calculate_cashflows(
-        well_forecasts,
-        effective_date=econ_params['Effective Date'],
-        discount_rate=econ_params['Discount Rate'],
-        df_strip=df_strip
-    )
-else:
-    well_cashflows, total_cashflow = calculate_cashflows(
-        well_forecasts,
-        effective_date=econ_params['Effective Date'],
-        discount_rate=econ_params['Discount Rate']
-    )
-
-# 🗓 Format today's date as "Apr-23-2025"
-today_str = datetime.today().strftime('%m.%d.%Y')
-
-# 👤 Clean client name
-client_name_safe = econ_params.get('Client', 'UnknownClient')
-
-# 🧾 Monthly report filename
-enhanced_pdf_path = f"SE_Economics_{client_name_safe}_Prelim Cashflow Monthly {today_str}.pdf"
-generate_cashflow_pdf_table_with_monthly(
-    well_cashflows,
-    total_cashflow,
-    econ_params,
-    output_path=enhanced_pdf_path,
-    get_aries_summary_text=get_aries_summary_text  # ✅ explicitly pass it in
-)
+        pdf.infodict().update({
+            'Title': econ_params.get('Project', ''),
+            'Author': econ_params.get('Client', ''),
+            'CreationDate': datetime.now()
+        })
+        render_cashflow_page(pdf, yearly, "Yearly Cashflow Summary")
 
 
-# 📥 Download the enhanced report
-from google.colab import files
-files.download(enhanced_pdf_path)
+def render_mixed_table(pdf: PdfPages, df_yearly, df_monthly, title):
+    """
+    Renders a combined yearly + monthly table.
+    """
+    # first yearly
+    render_cashflow_page(pdf, df_yearly, title + " (Yearly)")
+    # then monthly
+    fig, ax = plt.subplots(figsize=(8, len(df_monthly)*0.12 + 1))
+    ax.axis('off')
+    tbl = ax.table(cellText=df_monthly.values, colLabels=df_monthly.columns, loc='center')
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(6)
+    pdf.savefig(fig)
+    plt.close(fig)
 
-"""# Export Oneline Report"""
 
-# 📊 Final Oneline Summary Export with Discounted CF added
-import pandas as pd
-import numpy as np
-from google.colab import files
-from datetime import datetime
+def generate_cashflow_pdf_table_with_monthly(
+    well_cashflows, total_cashflow, econ_params, output_path, get_aries_summary_text
+):
+    """
+    Generates a PDF with both yearly and monthly cashflow tables + summary text.
+    """
+    yearly = summarize_yearly(total_cashflow)
+    monthly = total_cashflow[['Date', 'Free CF']].copy()
+    with PdfPages(output_path) as pdf:
+        pdf.infodict().update({
+            'Title': econ_params.get('Project', ''),
+            'Author': econ_params.get('Client', ''),
+            'CreationDate': datetime.now()
+        })
+        # Add summary
+        text = get_aries_summary_text(total_cashflow, econ_params.get('Discount Rate', 0.0))
+        fig, ax = plt.subplots(figsize=(8, 1))
+        ax.axis('off')
+        ax.text(0, 0.5, text, fontsize=10)
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        render_mixed_table(pdf, yearly, monthly, "Cashflow Summary")
+
 
 def generate_oneline_summary_excel(
-    well_cashflows,
-    econ_params,
-    df_ownership=None,
-    df_opex=None,
-    output_path=None
+    well_cashflows, econ_params, df_ownership=None, df_opex=None
 ):
     """
-    Exports a one‐line summary Excel file for each well, including PV0, PV9, PV10‐PV100.
-    Discounted CF is calculated using end‐of‐period discounting on Free Cash Flow
-    (Revenue − OpEx − CapEx − Taxes).
-
-    Parameters:
-      - well_cashflows: list of DataFrames, one per well, each containing monthly fields:
-          Date, Months, Oil Gross (bbl), Gas Gross (mcf), NGL Gross (bbl),
-          Oil Net (bbl), Gas Net (mcf), NGL Net (bbl),
-          Total Revenue, OpEx, Capex, Taxes
-      - econ_params:   dict containing at least { 'Client': <string> }
-      - df_ownership: optional DataFrame with columns [API14, WI, NRI]
-      - df_opex:      optional DataFrame with columns [API14, OpEx]
-      - output_path:  optional string filename; if None, a default is created.
+    Writes a one‐line Excel summary of PV10, IRR, etc., across wells.
     """
-    # 🗓 Format today's date as "04.23.2025"
-    today_str = datetime.today().strftime('%m.%d.%Y')
-
-    # 👤 Clean client name (remove spaces/special chars if you want)
-    client_name_safe = econ_params.get('Client', 'UnknownClient').replace(" ", "")
-
-    # 📁 Default filename if none is passed in
-    if output_path is None:
-        output_path = f"SE_Economics_{client_name_safe}_Oneline_Report_{today_str}.xlsx"
-
-    summary_rows = []
-
+    rows = []
     for df in well_cashflows:
-        # Each df is assumed to already have all the monthly columns:
-        #   Date, Months, Oil Gross (bbl), Gas Gross (mcf), NGL Gross (bbl),
-        #   Oil Net (bbl), Gas Net (mcf), NGL Net (bbl),
-        #   Total Revenue, OpEx, Capex, Taxes
-
-        api  = df['API14'].iloc[0]
-        name = df['WellName'].iloc[0]
-
-        # 1) Compute Free CF for each month: Revenue − OpEx − CapEx − Taxes
-        df = df.copy()
-        df['Free CF'] = df['Total Revenue'] - df['OpEx'] - df['Capex'] - df['Taxes']
-
-        # 2) Look up WI, NRI, OpEx override (if provided)
-        if df_ownership is not None and api in df_ownership['API14'].values:
-            wi  = float(df_ownership.loc[df_ownership['API14'] == api, 'WI'].iloc[0])
-            nri = float(df_ownership.loc[df_ownership['API14'] == api, 'NRI'].iloc[0])
-        else:
-            wi  = None
-            nri = None
-
-        if df_opex is not None and api in df_opex['API14'].values:
-            opex_override = float(df_opex.loc[df_opex['API14'] == api, 'OpEx'].iloc[0])
-        else:
-            opex_override = 0.0
-
-        # 3) Aggregated volumes and costs
-        gross_oil = df['Oil Gross (bbl)'].sum()
-        gross_gas = df['Gas Gross (mcf)'].sum()
-        gross_ngl = df['NGL Gross (bbl)'].sum()
-        net_oil   = df['Oil Net (bbl)'].sum()
-        net_gas   = df['Gas Net (mcf)'].sum()
-        net_ngl   = df['NGL Net (bbl)'].sum()
-
-        total_capex = df['Capex'].sum()
-        total_opex  = df['OpEx'].sum()
-        total_cf    = df['Free CF'].sum()
-
-        # 4) Calculate PV at various rates, using end‐of‐period discounting on Free CF
-        pv_values = {}
-        total_dcf  = 0.0
-
-        for rate in [0, 9] + list(range(10, 101, 10)):
-            # End‐of‐period discount factor: (1 + rate/100)^( - Months/12 )
-            df['Discount Factor'] = (1 + rate / 100) ** ( - (df['Months'] / 12) )
-
-            # Discounted CF = Free CF × Discount Factor
-            df['Discounted CF'] = df['Free CF'] * df['Discount Factor']
-
-            # Sum up to get PV at that rate
-            pv = df['Discounted CF'].sum()
-
-            # Store in M$ (divide by 1,000)
-            pv_values[f'PV{rate}'] = round(pv / 1_000, 2)
-
-            # Keep PV10 as our “Discounted CF (M$)” field
-            if rate == 10:
-                total_dcf = pv
-
-        # 5) Build the final row dictionary
-        row = {
-            'API14':            api,
-            'WellName':         name,
-            'WI (%)':           f"{wi * 100:.2f}%" if wi is not None else None,
-            'NRI (%)':          f"{nri * 100:.2f}%" if nri is not None else None,
-
-            'Gross Oil (Mbbl)': round(gross_oil / 1_000, 2),
-            'Gross Gas (Mmcf)': round(gross_gas / 1_000, 2),
-            'Gross NGL (Mbbl)': round(gross_ngl / 1_000, 2),
-
-            'Net Oil (Mbbl)':   round(net_oil / 1_000, 2),
-            'Net Gas (Mmcf)':   round(net_gas / 1_000, 2),
-            'Net NGL (Mbbl)':   round(net_ngl / 1_000, 2),
-
-            'Total Capex (M$)': round(total_capex / 1_000, 2),
-            'Total OpEx (M$)':  round(total_opex / 1_000, 2),
-            'Net CF (M$)':      round(total_cf / 1_000, 2),
-            'Discounted CF (M$)': round(total_dcf / 1_000, 2),
-        }
-        # Add PV columns (PV0, PV9, PV10, PV20, … PV100)
-        row.update(pv_values)
-
-        summary_rows.append(row)
-
-    # 6) Create DataFrame, sort by PV10 descending, and write to Excel
-    df_summary = pd.DataFrame(summary_rows)
-    df_summary = df_summary.sort_values(by='PV10', ascending=False).reset_index(drop=True)
-
-    df_summary.to_excel(output_path, index=False)
-    files.download(output_path)
-
-
-# ▶️ Run export
-generate_oneline_summary_excel(well_cashflows, econ_params, df_ownership=df_ownership, df_opex=df_opex)
-
-"""# Monthly Cf export"""
-
-# 📊 Export monthly cashflow with detailed tax breakdown and no discount factor
-import pandas as pd
-from google.colab import files
-
-from datetime import datetime
-
-def export_monthly_cashflow_excel(well_cashflows, output_path=None):
-    # 🗓 Format today's date as "Apr-23-2025"
-    today_str = datetime.today().strftime('%m.%d.%Y')
-
-    # 👤 Get and clean client name
-    client_name_safe = econ_params.get('Client', 'UnknownClient')
-
-    # 📁 Default dynamic output filename if not provided
-    if output_path is None:
-        output_path = f"SE_Economics_{client_name_safe}_Monthly Report {today_str}.xlsx"
-
-    all_rows = []
-
-    for df in well_cashflows:
-        df = df.copy()
         api = df['API14'].iloc[0]
         name = df['WellName'].iloc[0]
+        pv10 = (df['Disc CF'].sum() / 1_000)
+        irr = compute_project_irr(
+            df['Free CF'].resample('A', on='Date').sum().values
+        )
+        rows.append({
+            'API14': api,
+            'WellName': name,
+            'PV10 (MM$)': pv10,
+            'IRR (%)': irr
+        })
+    summary_df = pd.DataFrame(rows).sort_values('PV10 (MM$)', ascending=False)
+    output_path = econ_params.get('Oneline Path', 'oneline_summary.xlsx')
+    summary_df.to_excel(output_path, index=False)
 
-        # Extract constants
-        wi = df['WI'].iloc[0] if 'WI' in df.columns else 1.0
-        fixed_opex = df['OpEx'].iloc[0] if 'OpEx' in df.columns else 0.0
-        oil_opex = df['Oil OpEx'].iloc[0] if 'Oil OpEx' in df.columns else 0.0
-        gas_opex = df['Gas OpEx'].iloc[0] if 'Gas OpEx' in df.columns else 0.0
-        severance_rate = df.get('Severance Tax %', pd.Series([0.05])).iloc[0]
-        advalorem_rate = df.get('Ad Valorem Tax %', pd.Series([0.02])).iloc[0]
 
-        # Breakdown taxes
-        df['Severance Tax ($)'] = df['Total Revenue'] * severance_rate
-        df['Ad Valorem Tax ($)'] = df['Total Revenue'] * advalorem_rate
+def export_monthly_cashflow_excel(
+    well_cashflows, econ_params, df_strip=None
+):
+    """
+    Writes detailed monthly cashflow (with tax breakdown) to Excel.
+    """
+    writer = pd.ExcelWriter(econ_params.get('Monthly Path', 'monthly_cashflow.xlsx'),
+                            engine='openpyxl')
+    for df in well_cashflows:
+        name = df['WellName'].iloc[0]
+        sheet = df[['Months', 'Oil', 'Gas', 'Free CF']].copy()
+        sheet.columns = ['Month', 'Oil', 'Gas', 'Free Cash Flow']
+        sheet.to_excel(writer, sheet_name=name[:31], index=False)
+    writer.save()
 
-        # Decompose OpEx
-        df['Fixed OpEx ($)'] = fixed_opex
-        df['Oil Var OpEx ($)'] = df['Oil Gross (bbl)'] * oil_opex * wi
-        df['Gas Var OpEx ($)'] = df['Gas Gross (mcf)'] * gas_opex * wi
 
-        df['API14'] = api
-        df['WellName'] = name
-
-        all_rows.append(df)
-
-    df_all = pd.concat(all_rows).reset_index(drop=True)
-
-    # 🧾 Column order
-    ordered_cols = [
-        'API14', 'WellName', 'Date', 'Months', 'Year',
-        'Oil Gross (bbl)', 'Gas Gross (mcf)', 'NGL Gross (bbl)',
-        'Oil Net (bbl)', 'Gas Net (mcf)', 'NGL Net (bbl)',
-        'Oil Price', 'Gas Price', 'NGL Price',
-        'Oil Revenue', 'Gas Revenue', 'NGL Revenue',
-        'Total Revenue',
-        'Severance Tax ($)', 'Ad Valorem Tax ($)',
-
-        'Fixed OpEx ($)', 'Oil Var OpEx ($)', 'Gas Var OpEx ($)',
-        'OpEx', 'Capex',
-
-        'Net CF'
-    ]
-
-    # Use only columns that exist
-    columns_in_df = [col for col in ordered_cols if col in df_all.columns]
-    df_all = df_all[columns_in_df]
-
-    df_all.to_excel(output_path, index=False, sheet_name="Monthly Cashflow")
-    files.download(output_path)
-
-# ▶️ Run export
-export_monthly_cashflow_excel(well_cashflows)
+if __name__ == "__main__":
+    print("SE Economics Engine module loaded. Call its functions from your app.")
