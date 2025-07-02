@@ -168,86 +168,119 @@ def summarize_yearly(total_cashflow):
     df['Year'] = df['Date'].dt.year
     return df.groupby('Year')[['Free CF','Disc CF']].sum().reset_index()
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Render Cashflow Page (fixed summary call)
+# ──────────────────────────────────────────────────────────────────────────────
 def render_cashflow_page(
     title, df_yearly, raw_df, pdf, page_num,
-    fontname, eff_str, client, project, pv_label,
-    get_summary_fn
+    fontname, effective_date_str,
+    client_name, project_name, pv_label,
+    get_summary_fn, discount_rate
 ):
-    headers = ["Year","Oil Gross","Gas Gross","NGL Gross","Water Gross",
-               "Oil Net","Gas Net","NGL Net","Oil $","Gas $","NGL $",
-               "Total Rev","Taxes","OpEx","Capex","Free CF","Disc CF"]
-    units   = ["(     )","(Mbbl)","(MMcf)","(Mbbl)","(Mbbl)",
-               "(Mbbl)","(MMcf)","(Mbbl)","($/bbl)","($/mcf)","($/bbl)",
-               "(M$)","(M$)","(M$)","(M$)","(M$)","(M$)"]
-    col_w   = [9,10,10,10,10,10,10,10,8,8,8,11,8,8,8,11,11]
-    fmt     = lambda v,scale=1000: f"{v/scale:,.2f}" if pd.notnull(v) else "   -   "
-    fmtp    = lambda v: f"{v:,.2f}" if pd.notnull(v) else "   -   "
-    row     = lambda vals: " ".join(str(v).rjust(w) for v,w in zip(vals,col_w))
+    headers = [
+        "Year","Oil Gross","Gas Gross","NGL Gross","Water Gross",
+        "Oil Net","Gas Net","NGL Net",
+        "Oil $","Gas $","NGL $",
+        "Total Rev","Taxes","OpEx","Capex","Free CF","Disc CF"
+    ]
+    units = ["(     )","(Mbbl)","(MMcf)","(Mbbl)","(Mbbl)",
+             "(Mbbl)","(MMcf)","(Mbbl)",
+             "($/bbl)","($/mcf)","($/bbl)",
+             "(M$)","(M$)","(M$)","(M$)","(M$)","(M$)"]
+    col_w = [9,10,10,10,10,10,10,10,8,8,8,11,8,8,8,11,11]
 
-    fig, ax = plt.subplots(figsize=(15,0.6+0.25*(len(df_yearly)+6)))
+    def fmt(v, scale=1000):
+        return f"{v/scale:,.2f}" if pd.notnull(v) else "   -   "
+    def row(vals):
+        return " ".join(str(v).rjust(w) for v,w in zip(vals, col_w))
+
+    # Page header
+    fig, ax = plt.subplots(figsize=(15, 0.6 + 0.25*(len(df_yearly)+6)))
     ax.axis('off')
-    ax.text(0.5,1.06,"Schaper Energy Economics Engine",ha='center',va='bottom',
-            fontsize=12,fontweight='bold',fontname=fontname,transform=ax.transAxes)
-    ax.text(0.5,1.03,f"Effective Date: {eff_str}",ha='center',va='bottom',
-            fontsize=10,fontname=fontname,transform=ax.transAxes)
-    ax.text(0.5,1.00,f"Client: {client}",ha='center',va='bottom',
-            fontsize=10,fontname=fontname,transform=ax.transAxes)
-    ax.text(0.5,0.975,f"Project: {project} | {pv_label}",ha='center',va='bottom',
-            fontsize=10,fontname=fontname,transform=ax.transAxes)
+    ax.text(0.5,1.06, "Schaper Energy Economics Engine", ha='center', va='bottom',
+            fontsize=12, fontweight='bold', fontname=fontname, transform=ax.transAxes)
+    ax.text(0.5,1.03, f"Effective Date: {effective_date_str}", ha='center', va='bottom',
+            fontsize=10, fontname=fontname, transform=ax.transAxes)
+    ax.text(0.5,1.00, f"Client: {client_name}", ha='center', va='bottom',
+            fontsize=10, fontname=fontname, transform=ax.transAxes)
+    ax.text(0.5,0.975, f"Project: {project_name} | {pv_label}", ha='center', va='bottom',
+            fontsize=10, fontname=fontname, transform=ax.transAxes)
 
+    # Build table lines
     lines = [title, row(headers), row(units)]
-    for _,r in df_yearly.iterrows():
+    for _, r in df_yearly.iterrows():
         year = int(r['Year'])
+        total_oil  = raw_df.loc[raw_df['Date'].dt.year==year, 'Oil'].sum()
+        total_gas  = raw_df.loc[raw_df['Date'].dt.year==year, 'Gas'].sum()
+        total_ngl  = raw_df.loc[raw_df['Date'].dt.year==year, 'NGL'].sum()
+        total_wat  = raw_df.loc[raw_df['Date'].dt.year==year, 'Water'].sum()
         vals = [
             year,
-            fmt(raw_df[raw_df['Date'].dt.year==year]['Oil'].sum()),
-            fmt(raw_df[raw_df['Date'].dt.year==year]['Gas'].sum()),
-            fmt(raw_df[raw_df['Date'].dt.year==year]['NGL'].sum()),
-            fmt(raw_df[raw_df['Date'].dt.year==year]['Water'].sum()),
+            fmt(total_oil), fmt(total_gas), fmt(total_ngl), fmt(total_wat),
             fmt(r['Free CF']), fmt(r['Disc CF'])
         ] + ['']*(len(headers)-7)
         lines.append(row(vals))
+
+    # Total row
     tot = df_yearly[['Free CF','Disc CF']].sum()
-    total_vals = ["TOTAL"] + ['']*(len(headers)-3) + [fmt(tot['Free CF']),fmt(tot['Disc CF'])]
+    total_vals = ["TOTAL"] + ['']*(len(headers)-3) + [fmt(tot['Free CF']), fmt(tot['Disc CF'])]
     lines.append(row(total_vals))
 
-    ax.text(0,0.94,"\n".join(lines),va='top',ha='left',
-            fontname=fontname,fontsize=7,transform=ax.transAxes)
-    summary = get_summary_fn(raw_df, econ_params={'Discount Rate':None})
-    ax.text(0.01,0.02,summary, fontname=fontname,fontsize=7,
-            ha='left',va='bottom',transform=ax.transAxes)
-    ax.text(0.5,0.01,f"Page {page_num}",ha='center',va='bottom',
-            fontsize=8,fontname=fontname,transform=ax.transAxes)
+    # Draw table
+    ax.text(0,0.94, "\n".join(lines), va='top', ha='left',
+            fontname=fontname, fontsize=7, transform=ax.transAxes)
 
-    pdf.savefig(fig); plt.close(fig)
+    # Aries-style summary (now passing discount_rate correctly)
+    summary = get_summary_fn(raw_df, discount_rate)
+    ax.text(0.01,0.02, summary, fontname=fontname, fontsize=7,
+            ha='left', va='bottom', transform=ax.transAxes)
 
+    # Page number
+    ax.text(0.5,0.01, f"Page {page_num}", ha='center', va='bottom',
+            fontsize=8, fontname=fontname, transform=ax.transAxes)
+
+    pdf.savefig(fig)
+    plt.close(fig)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Generate Cashflow PDF Table (fixed signature)
+# ──────────────────────────────────────────────────────────────────────────────
 def generate_cashflow_pdf_table(
     well_cashflows, total_cashflow, econ_params, output_path="Cashflow_Report.pdf"
 ):
     fontname = 'monospace'
     eff_str  = pd.to_datetime(econ_params['Effective Date']).strftime('%B %d, %Y')
-    dr       = econ_params.get('Discount Rate',0.0)
+    dr       = econ_params.get('Discount Rate', 0.0)
     pv_label = f"PV{int(dr*100)}"
-    client   = econ_params.get('Client','')
-    project  = econ_params.get('Project','')
+    client   = econ_params.get('Client', '')
+    project  = econ_params.get('Project', '')
 
     with PdfPages(output_path) as pdf:
+        # Project summary page
         yearly = summarize_yearly(total_cashflow)
         render_cashflow_page(
             "Total Project Cashflow Summary",
             yearly, total_cashflow,
-            pdf, 1, fontname, eff_str, client, project, pv_label,
-            compute_project_irr
+            pdf, 1, fontname, eff_str,
+            client, project, pv_label,
+            get_aries_summary_text,  # summary fn
+            dr                        # pass discount rate
         )
-        for i,df in enumerate(well_cashflows,start=2):
+
+        # Per-well pages
+        for i, df in enumerate(well_cashflows, start=2):
             yearly_w = summarize_yearly(df)
             render_cashflow_page(
                 f"Cashflow for {df['WellName'].iloc[0]} (API: {df['API14'].iloc[0]})",
                 yearly_w, df,
-                pdf, i, fontname, eff_str, client, project, pv_label,
-                compute_project_irr
+                pdf, i, fontname, eff_str,
+                client, project, pv_label,
+                get_aries_summary_text,
+                dr
             )
     return output_path
+
 
 def render_mixed_table(
     pdf, df_monthly, df_yearly, df_full,
