@@ -4,6 +4,8 @@ from io import BytesIO
 import tempfile
 from datetime import datetime
 import se_economics_engine_v5 as engine
+import se_economics_engine_v5 as engine
+
 
 st.set_page_config(page_title="Schaper Econ Engine", layout="wide")
 
