@@ -38,62 +38,89 @@ def build_pv_summary(df, pv_rates=None):
         lines.append(f"{rate:>6.2f}           {val:>10.2f}")
     return lines
 
-def build_forecast_inputs(df_forecast, econ_params,
-                          df_ownership=None, df_diff=None,
-                          df_opex=None, df_capex=None):
+def build_forecast_inputs(
+    df_forecast, econ_params,
+    df_ownership=None, df_diff=None,
+    df_opex=None, df_capex=None
+):
+    """
+    Merge forecast with ownership, differential, OPEX & CAPEX overrides.
+    Returns list of per-well input dicts.
+    """
     df = df_forecast.copy()
     df['API14'] = clean_api14(df['API14'])
+
+    # normalize override API14 columns
     for d in (df_ownership, df_diff, df_opex, df_capex):
-        if isinstance(d, pd.DataFrame) and 'API14' in d:
+        if isinstance(d, pd.DataFrame) and 'API14' in d.columns:
             d['API14'] = clean_api14(d['API14'])
+
     wells = []
     for api, sub in df.groupby('API14'):
+        # prepare series, filling missing streams with zeros
+        oil_series   = sub['Oil (bbl)']
+        gas_series   = sub['Gas (mcf)']
+        ngl_series   = sub['NGL (bbl)'] if 'NGL (bbl)' in sub.columns else pd.Series(0.0, index=sub.index)
+        water_series = sub['Water (bbl)'] if 'Water (bbl)' in sub.columns else pd.Series(0.0, index=sub.index)
+
         row = sub.iloc[0]
         w = {
-            'API14': api,
+            'API14':    api,
             'WellName': row['WellName'],
-            'WI': econ_params.get('WI',1.0),
-            'NRI': econ_params.get('NRI',1.0),
+            'WI':       econ_params.get('WI', 1.0),
+            'NRI':      econ_params.get('NRI', 1.0)
         }
-        # overrides
+
+        # Ownership override
         if isinstance(df_ownership, pd.DataFrame):
-            tmp = df_ownership[df_ownership['API14']==api]
+            tmp = df_ownership[df_ownership['API14'] == api]
             if not tmp.empty:
                 w['WI'], w['NRI'] = tmp[['WI','NRI']].iloc[0]
-        # streams
-        w['Oil (bbl)'] = (sub['Oil (bbl)'] * w['WI'] * w['NRI']).tolist()
-        w['Gas (mcf)'] = (sub['Gas (mcf)'] * w['WI'] * w['NRI']).tolist()
-        w['NGL (bbl)'] = (sub.get('NGL (bbl)',0.0) * w['WI'] * w['NRI']).tolist()
-        w['Water (bbl)'] = (sub.get('Water (bbl)',0.0) * w['WI'] * w['NRI']).tolist()
-        # prices
-        w['Oil Price'] = econ_params.get('Oil Price',0.0)
-        w['Gas Price'] = econ_params.get('Gas Price',0.0)
+
+        # Streams (apply WI & NRI)
+        w['Oil (bbl)']   = (oil_series   * w['WI'] * w['NRI']).tolist()
+        w['Gas (mcf)']   = (gas_series   * w['WI'] * w['NRI']).tolist()
+        w['NGL (bbl)']   = (ngl_series   * w['WI'] * w['NRI']).tolist()
+        w['Water (bbl)'] = (water_series * w['WI'] * w['NRI']).tolist()
+
+        # Price defaults & overrides...
+        w['Oil Price'] = econ_params.get('Oil Price', 0.0)
+        w['Gas Price'] = econ_params.get('Gas Price', 0.0)
         if isinstance(df_diff, pd.DataFrame):
-            tmp = df_diff[df_diff['API14']==api]
+            tmp = df_diff[df_diff['API14'] == api]
             if not tmp.empty:
-                for c in tmp:
+                for c in tmp.columns:
                     lc = c.lower()
                     if 'oil' in lc and 'price' in lc:
                         w['Oil Price'] = tmp[c].iloc[0]
                     if 'gas' in lc and 'price' in lc:
                         w['Gas Price'] = tmp[c].iloc[0]
-        # other params
-        w['NGL Yield'] = econ_params.get('NGL Yield (bbl/MMcf)',0.0)
-        w['Shrink']    = econ_params.get('Shrink',1.0)
-        w['OpEx']      = econ_params.get('OpEx',0.0)
+
+        # Other parameters
+        w['NGL Yield'] = econ_params.get('NGL Yield (bbl/MMcf)', 0.0)
+        w['Shrink']    = econ_params.get('Shrink', 1.0)
+
+        # OpEx & CapEx overrides
+        w['OpEx']   = econ_params.get('OpEx', 0.0)
         if isinstance(df_opex, pd.DataFrame):
-            tmp = df_opex[df_opex['API14']==api]
-            if not tmp.empty and 'OpEx' in tmp:
+            tmp = df_opex[df_opex['API14'] == api]
+            if not tmp.empty and 'OpEx' in tmp.columns:
                 w['OpEx'] = tmp['OpEx'].iloc[0]
-        w['Capex']     = econ_params.get('Capex',0.0)
+
+        w['Capex']  = econ_params.get('Capex', 0.0)
         if isinstance(df_capex, pd.DataFrame):
-            tmp = df_capex[df_capex['API14']==api]
-            if not tmp.empty and 'CapEx' in tmp:
+            tmp = df_capex[df_capex['API14'] == api]
+            if not tmp.empty and 'CapEx' in tmp.columns:
                 w['Capex'] = tmp['CapEx'].iloc[0]
-        w['Severance Tax %']  = econ_params.get('Severance Tax %',0.0)
-        w['Ad Valorem Tax %'] = econ_params.get('Ad Valorem Tax %',0.0)
+
+        # Taxes
+        w['Severance Tax %']  = econ_params.get('Severance Tax %', 0.0)
+        w['Ad Valorem Tax %'] = econ_params.get('Ad Valorem Tax %', 0.0)
+
         wells.append(w)
+
     return wells
+
 
 def calculate_cashflows(well_forecasts, effective_date, discount_rate, df_strip=None):
     all_wells, combined = [], []
