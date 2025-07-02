@@ -1,166 +1,106 @@
-# app.py
 import streamlit as st
 import pandas as pd
-import numpy as np
-from fpdf import FPDF
-import os
-import io
+from io import BytesIO
+import tempfile
+from datetime import datetime
+import se_economics_engine_v5 as engine
 
-# Optional: let user upload a logo
-LOGO_PATH = None
-uploaded_logo = st.file_uploader("Upload logo image (optional)", type=["png","jpg","jpeg"])
-if uploaded_logo:
-    LOGO_PATH = "logo_upload.png"
-    with open(LOGO_PATH, "wb") as f:
-        f.write(uploaded_logo.getbuffer())
+st.set_page_config(page_title="Schaper Econ Engine", layout="wide")
 
-# PDF class with logo and page number
-class PDFWithPageNumbers(FPDF):
-    def __init__(self, logo_path=None):
-        super().__init__()
-        self.logo_path = logo_path
+st.title("📊 Schaper Energy Consulting Economics Engine")
 
-    def footer(self):
-        self.set_y(-15)
-        self.set_font("Times", "I", 8)
-        self.cell(0, 10, f"Page {self.page_no()}", 0, 0, "C")
-        if self.logo_path and os.path.exists(self.logo_path):
-            logo_width = 12
-            x_position = self.w - self.r_margin - logo_width
-            y_position = self.h - 15
-            self.image(self.logo_path, x=x_position, y=y_position, w=logo_width)
+# Sidebar inputs
+st.sidebar.header("1. Upload Inputs")
+forecast_file = st.sidebar.file_uploader("Forecast CSV", type=["csv"])
+excel_file   = st.sidebar.file_uploader("Economic Inputs Excel", type=["xlsx", "xls"])
 
+st.sidebar.header("2. Econ Parameters")
+effective_date = st.sidebar.date_input("Effective Date", value=datetime.today())
+discount_rate  = st.sidebar.number_input("Discount Rate", value=0.09, step=0.005)
+severance_tax  = st.sidebar.number_input("Severance Tax %", value=0.06, step=0.005)
+ad_valorem_tax = st.sidebar.number_input("Ad Valorem Tax %", value=0.00, step=0.005)
+ngl_yield      = st.sidebar.number_input("NGL Yield (bbl/MMcf)", value=72.0)
+shrink         = st.sidebar.number_input("Shrink", value=0.48)
 
-# all your existing helper functions:
-def load_oneline(file_buffer):
-    df = pd.read_excel(file_buffer, sheet_name="Oneline")
-    df.columns = df.columns.str.strip()
-    return df
+client_name  = st.sidebar.text_input("Client", value="Schaper Energy Consulting LLC")
+project_name = st.sidebar.text_input("Project", value="Mineral Evaluation PV Tool")
 
-def calculate_variances(begin_df, final_df, npv_column):
-    key_columns = [
-        "Net Total Revenue ($)", "Net Operating Expense ($)", "Inital Approx WI", "Initial Approx NRI",
-        "Net Res Oil (Mbbl)", "Net Res Gas (MMcf)", "Net Capex ($)", "Net Res NGL (Mbbl)", npv_column
-    ]
-    merged = begin_df.merge(final_df, on=["PROPNUM","LEASE_NAME"], suffixes=("_begin","_final"), how="left")
-    for col in key_columns:
-        if f"{col}_begin" in merged and f"{col}_final" in merged:
-            merged[f"{col} Variance"] = merged[f"{col}_final"] - merged[f"{col}_begin"]
-    merged['Reserve Category Begin'] = merged['SE_RSV_CAT_begin']
-    merged['Reserve Category Final'] = merged['SE_RSV_CAT_final']
-    return merged
+run = st.sidebar.button("▶️ Run Reports")
 
-def generate_explanations(variance_df, npv_column):
-    explanations = []
-    thresholds = {
-        "Net Total Revenue ($)": 0.05,
-        "Net Operating Expense ($)": 0.05,
-        "Inital Approx WI": 0.05,
-        "Net Res Oil (Mbbl)": 0.05,
-        "Net Res Gas (MMcf)": 0.05,
-        "Net Capex ($)": 0.05,
-        "Net Res NGL (Mbbl)": 0.05,
-        npv_column: 0.05
-    }
-    for _, row in variance_df.iterrows():
-        max_var = 0; max_col = None
-        for col, thresh in thresholds.items():
-            vb = row.get(f"{col}_begin", 0)
-            vf = row.get(f"{col}_final", 0)
-            if vb and abs(vf - vb)/abs(vb) > thresh and abs(vf - vb) > max_var:
-                max_var = abs(vf - vb); max_col = col
-        expl = ""
-        if max_col:
-            var = row[f"{max_col} Variance"]
-            expl = f"{max_col} changed by {var:,.2f}."
-        explanations.append({
-            "PROPNUM": row["PROPNUM"],
-            "LEASE_NAME": row["LEASE_NAME"],
-            "Key Metric": max_col or "",
-            "Variance Value": max_var,
-            "Explanation": expl
-        })
-    return pd.DataFrame(explanations)
+if run:
+    if not forecast_file or not excel_file:
+        st.sidebar.error("Please upload both CSV and Excel files.")
+    else:
+        # 1) Load forecast
+        df_forecast = pd.read_csv(forecast_file)
+        df_forecast['API14'] = engine.clean_api14(df_forecast['API14'])
+        
+        # 2) Load overrides
+        xl = pd.ExcelFile(excel_file)
+        df_ownership = xl.parse("Ownership")     if "Ownership"     in xl.sheet_names else None
+        df_strip     = xl.parse("Strip")         if "Strip"         in xl.sheet_names else None
+        df_diff      = xl.parse("Differentials") if "Differentials" in xl.sheet_names else None
+        df_opex      = xl.parse("Expenses")      if "Expenses"      in xl.sheet_names else None
+        df_capex     = xl.parse("Capital")       if "Capital"       in xl.sheet_names else None
 
-def identify_negative_npv(variance_df, npv_column):
-    return variance_df[
-        (variance_df[f"{npv_column}_begin"]>0) & (variance_df[f"{npv_column}_final"]<=0)
-    ][["PROPNUM","LEASE_NAME"]]
+        for df in (df_ownership, df_diff, df_opex, df_capex):
+            if df is not None:
+                df['API14'] = engine.clean_api14(df['API14'])
 
-def calculate_nri_wi_ratio(begin_df, final_df):
-    def comp(df):
-        df = df[df['Inital Approx WI']!=0]
-        df['NRI/WI Ratio'] = df['Initial Approx NRI'] / df['Inital Approx WI']
-        return df[['PROPNUM','LEASE_NAME','NRI/WI Ratio']]
-    b = comp(begin_df).rename(columns={'NRI/WI Ratio':'Begin Ratio'})
-    f = comp(final_df).rename(columns={'NRI/WI Ratio':'Final Ratio'})
-    merged = b.merge(f, on=['PROPNUM','LEASE_NAME'], how='outer')
-    merged['Outlier Source'] = merged.apply(
-        lambda r: 'Begin' if not 0.70<r['Begin Ratio']<0.85 else
-                  ('Final' if not 0.70<r['Final Ratio']<0.85 else None),
-        axis=1
-    )
-    return merged.dropna(subset=['Outlier Source'])
+        # 3) Build econ_params
+        econ_params = {
+            "Effective Date": effective_date,
+            "Discount Rate":  discount_rate,
+            "Severance Tax %": severance_tax,
+            "Ad Valorem Tax %": ad_valorem_tax,
+            "Client": client_name,
+            "Project": project_name,
+            "NGL Yield (bbl/MMcf)": ngl_yield,
+            "Shrink": shrink
+        }
 
+        # 4) Run engine
+        well_forecasts = engine.build_forecast_inputs(
+            df_forecast, econ_params,
+            df_ownership=df_ownership,
+            df_diff=df_diff,
+            df_opex=df_opex,
+            df_capex=df_capex
+        )
 
-st.title("Schaper Energy Oneline Comparison")
+        well_cashflows, total_cashflow = engine.calculate_cashflows(
+            well_forecasts,
+            effective_date=econ_params["Effective Date"],
+            discount_rate=econ_params["Discount Rate"],
+            df_strip=df_strip
+        )
 
-# File upload
-begin_file = st.file_uploader("Upload BEGIN Excel", type=["xlsx"])
-final_file = st.file_uploader("Upload FINAL Excel", type=["xlsx"])
-npv_column = st.text_input("NPV column name (e.g. NPV at 9%)")
+        # 5) Generate PDFs to temp files
+        tmp_yearly  = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
+        tmp_monthly = tempfile.NamedTemporaryFile(suffix=".pdf", delete=False).name
 
-if begin_file and final_file and npv_column:
-    begin_df = load_oneline(begin_file)
-    final_df = load_oneline(final_file)
+        engine.generate_cashflow_pdf_table(
+            well_cashflows, total_cashflow, econ_params, output_path=tmp_yearly
+        )
+        engine.generate_cashflow_pdf_table_with_monthly(
+            well_cashflows, total_cashflow, econ_params,
+            output_path=tmp_monthly,
+            get_aries_summary_text=engine.get_aries_summary_text
+        )
 
-    # compute
-    var_df = calculate_variances(begin_df, final_df, npv_column)
-    expl_df = generate_explanations(var_df, npv_column)
-    neg_df  = identify_negative_npv(var_df, npv_column)
-    nri_df  = calculate_nri_wi_ratio(begin_df, final_df)
+        # 6) Download buttons
+        with open(tmp_yearly, "rb") as f:
+            st.download_button(
+                label="📥 Download Yearly Report",
+                data=f.read(),
+                file_name=f"Yearly_Cashflow_{datetime.today():%Y%m%d}.pdf",
+                mime="application/pdf"
+            )
 
-    st.subheader("Variance Summary")
-    st.dataframe(var_df)
-
-    st.subheader("Explanations")
-    st.dataframe(expl_df)
-
-    st.subheader("Wells with Negative or Zero NPV")
-    st.dataframe(neg_df)
-
-    st.subheader("NRI/WI Outliers")
-    st.dataframe(nri_df)
-
-    # Prepare Excel in-memory
-    towrite = io.BytesIO()
-    with pd.ExcelWriter(towrite, engine="openpyxl") as writer:
-        var_df.to_excel(writer, sheet_name="Variance", index=False)
-        expl_df.to_excel(writer, sheet_name="Explanations", index=False)
-        neg_df.to_excel(writer, sheet_name="Neg NPV Wells", index=False)
-        nri_df.to_excel(writer, sheet_name="NRI/WI Outliers", index=False)
-    towrite.seek(0)
-
-    st.download_button(
-        label="Download Excel Report",
-        data=towrite,
-        file_name="variance_report.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-    # Prepare PDF in-memory
-    pdf_buffer = io.BytesIO()
-    pdf = PDFWithPageNumbers(logo_path=LOGO_PATH)
-    pdf.add_page()
-    pdf.set_font("Times", size=12)
-    pdf.cell(0,10, f"Overall Variance Report", ln=True)
-    # (You can expand here: loop categories/pages as in your original function.)
-    pdf.output(pdf_buffer)
-    pdf_buffer.seek(0)
-
-    st.download_button(
-        label="Download PDF Report",
-        data=pdf_buffer,
-        file_name="variance_report.pdf",
-        mime="application/pdf"
-    )
+        with open(tmp_monthly, "rb") as f:
+            st.download_button(
+                label="📥 Download Monthly Report",
+                data=f.read(),
+                file_name=f"Monthly_Cashflow_{datetime.today():%Y%m%d}.pdf",
+                mime="application/pdf"
+            )
