@@ -845,6 +845,78 @@ def generate_oneline_summary_excel(
 
     return output_path
 
+def export_monthly_cashflow_excel(
+    well_cashflows,
+    econ_params,
+    output_path=None
+):
+    """
+    Exports a detailed monthly cashflow XLSX with tax & OpEx breakdown.
+    Returns the output filename.
+    """
+    from datetime import datetime
+    today_str = datetime.today().strftime('%m.%d.%Y')
+    client_safe = econ_params.get('Client','UnknownClient').replace(" ","")
+    if output_path is None:
+        output_path = f"SE_Economics_{client_safe}_Monthly_Report_{today_str}.xlsx"
+
+    all_rows = []
+    for df in well_cashflows:
+        dfm = df.copy()
+        api  = dfm['API14'].iloc[0]
+        name = dfm['WellName'].iloc[0]
+
+        # Constants
+        wi         = dfm.get('WI', pd.Series([1.0])).iloc[0]
+        fixed_opex = dfm.get('OpEx', pd.Series([0.0])).iloc[0]
+        oil_opex   = dfm.get('Oil OpEx', pd.Series([0.0])).iloc[0]
+        gas_opex   = dfm.get('Gas OpEx', pd.Series([0.0])).iloc[0]
+        sev_rate   = dfm.get('Severance Tax %', pd.Series([0.0])).iloc[0]
+        adv_rate   = dfm.get('Ad Valorem Tax %', pd.Series([0.0])).iloc[0]
+
+        # Tax breakdown
+        dfm['Severance Tax ($)'] = dfm['Total Revenue'] * sev_rate
+        dfm['Ad Valorem Tax ($)'] = dfm['Total Revenue'] * adv_rate
+
+        # OpEx breakdown
+        dfm['Fixed OpEx ($)']   = fixed_opex
+        dfm['Oil Var OpEx ($)'] = dfm['Oil Gross (bbl)'] * oil_opex * wi
+        dfm['Gas Var OpEx ($)'] = dfm['Gas Gross (mcf)'] * gas_opex * wi
+
+        if 'Net CF' not in dfm.columns:
+            dfm['Net CF'] = (
+                dfm['Total Revenue']
+                - dfm['OpEx']
+                - dfm['Capex']
+                - dfm['Taxes']
+            )
+
+        dfm['API14']    = api
+        dfm['WellName'] = name
+
+        all_rows.append(dfm)
+
+    df_all = pd.concat(all_rows, ignore_index=True)
+
+    # Desired column order
+    ordered_cols = [
+        'API14','WellName','Date','Months','Year',
+        'Oil Gross (bbl)','Gas Gross (mcf)','NGL Gross (bbl)',
+        'Oil Net (bbl)','Gas Net (mcf)','NGL Net (bbl)',
+        'Oil Price','Gas Price','NGL Price',
+        'Oil Revenue','Gas Revenue','NGL Revenue','Total Revenue',
+        'Severance Tax ($)','Ad Valorem Tax ($)',
+        'Fixed OpEx ($)','Oil Var OpEx ($)','Gas Var OpEx ($)',
+        'OpEx','Capex','Net CF'
+    ]
+    cols = [c for c in ordered_cols if c in df_all.columns]
+    df_final = df_all[cols]
+
+    # Write to Excel
+    df_final.to_excel(output_path, index=False, sheet_name="Monthly Cashflow")
+    return output_path
+
+
 
 # ------------------------------------------------------------------------------
 # 5. Export Buttons
