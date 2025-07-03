@@ -351,20 +351,26 @@ def render_cashflow_page(title, df_yearly, raw_df, pdf, page_num,
     pdf.savefig(fig)
     plt.close(fig)
 
-def render_mixed_table(df_mon, df_ann, df_full, df_yr, title, pdf, pg,
-                       wi=1.0, nri=0.75,
-                       client_name="TBD", project_name="TBD", pv_label="PVXX"):
+def render_mixed_table(
+    df_mon, df_ann, df_full, df_yr, title, pdf, pg,
+    wi=1.0, nri=0.75,
+    client_name="TBD", project_name="TBD", pv_label="PVXX"
+):
+    from matplotlib.backends.backend_pdf import PdfPages
+    # Prepare copies
     df_mon = df_mon.copy()
     df_ann = df_ann.copy()
     df_full = df_full.copy()
     df_yr = df_yr.copy()
 
-    # Label columns
+    # Create label columns
     df_mon['Label'] = df_mon['Date'].dt.strftime("%b %Y").str.rjust(9)
     df_ann['Label'] = df_ann['Year'].astype(str).str.rjust(9)
 
+    # Combine monthly and annual for the table body
     combined = pd.concat([df_mon, df_ann], ignore_index=True)
 
+    # Compute a TOTAL row from the full data
     total = (
         df_full
         .drop(columns=['Date', 'Year', 'Month', 'is_dec', 'Label'], errors='ignore')
@@ -372,6 +378,7 @@ def render_mixed_table(df_mon, df_ann, df_full, df_yr, title, pdf, pg,
     )
     total['Label'] = 'TOTAL'.rjust(9)
 
+    # Define headers, units, and column widths
     headers = [
         "Year", "Oil Gross", "Gas Gross", "NGL Gross", "Water Gross",
         "Oil Net", "Gas Net", "NGL Net",
@@ -386,6 +393,7 @@ def render_mixed_table(df_mon, df_ann, df_full, df_yr, title, pdf, pg,
     ]
     col_w = [9, 10, 10, 10, 10, 10, 10, 10, 8, 8, 8, 11, 8, 8, 8, 11, 11]
 
+    # Formatting helpers
     def fmt(v, scale=1_000):
         return f"{v/scale:,.2f}" if pd.notnull(v) else "   -   "
 
@@ -395,10 +403,11 @@ def render_mixed_table(df_mon, df_ann, df_full, df_yr, title, pdf, pg,
     def format_row(vals, widths):
         return " ".join(str(v).rjust(w) for v, w in zip(vals, widths))
 
+    # Begin drawing the page
     fig, ax = plt.subplots(figsize=(15, 0.5 + 0.22 * (len(combined) + 6)))
     ax.axis("off")
 
-    # Header text
+    # Header block
     ax.text(0.5, 1.06, "Schaper Energy Economics Engine", ha='center', va='bottom',
             fontsize=11, fontweight='bold', fontname='monospace', transform=ax.transAxes)
     ax.text(0.5, 1.03, f"Effective Date: {df_full['Date'].min():%B %d, %Y}", ha='center', va='bottom',
@@ -408,38 +417,60 @@ def render_mixed_table(df_mon, df_ann, df_full, df_yr, title, pdf, pg,
     ax.text(0.5, 0.975, f"Project: {project_name} | {pv_label}", ha='center', va='bottom',
             fontsize=9, fontname='monospace', transform=ax.transAxes)
 
-    # Table lines
+    # Build table lines
     lines = [
         f"Cashflow Summary for {title}",
         format_row(headers, col_w),
-        format_row(units, col_w)
+        format_row(units, col_w),
     ]
 
+    # Add each row from combined
     for _, r in combined.iterrows():
         row = [
             r['Label'],
-            fmt(r['Oil Gross (bbl)']), fmt(r['Gas Gross (mcf)']), fmt(r['NGL Gross (bbl)']), fmt(r.get('Water Gross (bbl)', 0.0)),
-            fmt(r['Oil Net (bbl)']), fmt(r['Gas Net (mcf)']), fmt(r['NGL Net (bbl)']),
-            fmt_price(r['Eff Oil Price']), fmt_price(r['Eff Gas Price']), fmt_price(r['Eff NGL Price']),
-            fmt(r['Total Revenue']), fmt(r['Taxes']), fmt(r['OpEx']), fmt(r['Capex']),
-            fmt(r['Free CF']), fmt(r['Discounted CF'])
+            fmt(r.get('Oil Gross (bbl)')),
+            fmt(r.get('Gas Gross (mcf)')),
+            fmt(r.get('NGL Gross (bbl)')),
+            fmt(r.get('Water Gross (bbl)', 0.0)),
+            fmt(r.get('Oil Net (bbl)')),
+            fmt(r.get('Gas Net (mcf)')),
+            fmt(r.get('NGL Net (bbl)')),
+            fmt_price(r.get('Eff Oil Price')),
+            fmt_price(r.get('Eff Gas Price')),
+            fmt_price(r.get('Eff NGL Price')),
+            fmt(r.get('Total Revenue')),
+            fmt(r.get('Taxes')),
+            fmt(r.get('OpEx')),
+            fmt(r.get('Capex')),
+            fmt(r.get('Free CF')),
+            fmt(r.get('Discounted CF')),
         ]
         lines.append(format_row(row, col_w))
 
-    # Total row
+    # Add the TOTAL row
     total_row = [
         total['Label'],
-        fmt(total['Oil Gross (bbl)']), fmt(total['Gas Gross (mcf)']), fmt(total['NGL Gross (bbl)']), fmt(total.get('Water Gross (bbl)', 0.0)),
-        fmt(total['Oil Net (bbl)']), fmt(total['Gas Net (mcf)']), fmt(total['NGL Net (bbl)']),
+        fmt(total.get('Oil Gross (bbl)')),
+        fmt(total.get('Gas Gross (mcf)')),
+        fmt(total.get('NGL Gross (bbl)')),
+        fmt(total.get('Water Gross (bbl)', 0.0)),
+        fmt(total.get('Oil Net (bbl)')),
+        fmt(total.get('Gas Net (mcf)')),
+        fmt(total.get('NGL Net (bbl)')),
         "", "", "",
-        fmt(total['Total Revenue']), fmt(total['Taxes']), fmt(total['OpEx']), fmt(total['Capex']),
-        fmt(total['Free CF']), fmt(total['Discounted CF'])
+        fmt(total.get('Total Revenue')),
+        fmt(total.get('Taxes')),
+        fmt(total.get('OpEx')),
+        fmt(total.get('Capex')),
+        fmt(total.get('Free CF')),
+        fmt(total.get('Discounted CF')),
     ]
     lines.append(format_row(total_row, col_w))
 
-    # Aries summary
+    # Aries‐style summary text
     summary = get_aries_summary_text(df_full, {'WI': wi, 'NRI': nri})
 
+    # Draw text on the figure
     ax.text(0, 0.94, "\n".join(lines), va='top', ha='left',
             fontname='monospace', fontsize=7, transform=ax.transAxes)
     ax.text(0.01, 0.02, summary, va='bottom', ha='left',
@@ -447,8 +478,10 @@ def render_mixed_table(df_mon, df_ann, df_full, df_yr, title, pdf, pg,
     ax.text(0.5, 0.01, f"Page {pg}", ha='center', va='bottom',
             fontsize=8, fontname='monospace', transform=ax.transAxes)
 
+    # Save the page
     pdf.savefig(fig)
     plt.close(fig)
+
 
 
 def generate_cashflow_pdf_table(well_cashflows, total_cashflow_df, econ_params, output_path="Cashflow_Report.pdf"):
