@@ -237,14 +237,43 @@ def calculate_cashflows(wells, effective_date, discount_rate, df_strip=None):
 def summarize_yearly(df):
     df = df.copy()
     df['Year'] = df['Date'].dt.year
-    df['Total Revenue'] = df[['Oil Revenue','Gas Revenue','NGL Revenue']].sum(axis=1)
+
+    # Safely sum any revenue columns that exist
+    rev_cols = [c for c in ['Oil Revenue', 'Gas Revenue', 'NGL Revenue'] if c in df.columns]
+    if rev_cols:
+        df['Total Revenue'] = df[rev_cols].sum(axis=1)
+    else:
+        df['Total Revenue'] = 0.0
+
+    # Free CF = Revenue − Taxes − OpEx − Capex (guard missing cols)
+    df['Taxes'] = df.get('Taxes', pd.Series(0, index=df.index))
+    df['OpEx']  = df.get('OpEx', pd.Series(0, index=df.index))
+    df['Capex'] = df.get('Capex', pd.Series(0, index=df.index))
     df['Free CF'] = df['Total Revenue'] - df['Taxes'] - df['OpEx'] - df['Capex']
+
+    # Mark December rows for annual end‐of‐year
     df['is_dec'] = df['Date'].dt.month == 12
-    return df.groupby('Year',as_index=False).agg({
-        'Oil Gross (bbl)':'sum','Gas Gross (mcf)':'sum','NGL Gross (bbl)':'sum','Water Gross (bbl)':'sum',
-        'Oil Net (bbl)':'sum','Gas Net (mcf)':'sum','NGL Net (bbl)':'sum',
-        'Total Revenue':'sum','Taxes':'sum','OpEx':'sum','Capex':'sum','Free CF':'sum','Discounted CF':'sum','is_dec':'max'
-    })
+
+    # Now aggregate
+    agg_dict = {
+        'Free CF': 'sum',
+        'Discounted CF': 'sum',
+        'is_dec': 'max'
+    }
+    # Include any production columns present
+    for col in ['Oil Gross (bbl)', 'Gas Gross (mcf)', 'NGL Gross (bbl)', 'Water Gross (bbl)',
+                'Oil Net (bbl)', 'Gas Net (mcf)', 'NGL Net (bbl)']:
+        if col in df.columns:
+            agg_dict[col] = 'sum'
+
+    # Include Total Revenue and Taxes if desired
+    agg_dict['Total Revenue'] = 'sum'
+    agg_dict['Taxes'] = 'sum'
+    agg_dict['OpEx'] = 'sum'
+    agg_dict['Capex'] = 'sum'
+
+    return df.groupby('Year', as_index=False).agg(agg_dict)
+
 
 def get_aries_summary_text(df, meta):
     df = df.copy()
