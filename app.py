@@ -764,6 +764,88 @@ def prep_wells(df_forecast, econ_params, dfs_overrides):
 def run_cashflows(well_inputs, effective_date, discount_rate, df_strip):
     return calculate_cashflows(well_inputs, effective_date, discount_rate, df_strip)
 
+def generate_oneline_summary_excel(
+    well_cashflows,
+    econ_params,
+    df_ownership=None,
+    df_opex=None,
+    output_path=None
+):
+    """
+    Exports a one‐line summary Excel file for each well,
+    including PV0, PV9, PV10‐PV100, and Discounted CF.
+    """
+    today_str = datetime.today().strftime('%m.%d.%Y')
+    client_safe = econ_params.get('Client', 'UnknownClient').replace(" ", "")
+    if output_path is None:
+        output_path = f"SE_Economics_{client_safe}_Oneline_Report_{today_str}.xlsx"
+
+    summary_rows = []
+    for df in well_cashflows:
+        api = df['API14'].iloc[0]
+        name = df['WellName'].iloc[0]
+
+        tmp = df.copy()
+        tmp['Free CF'] = tmp['Total Revenue'] - tmp['OpEx'] - tmp['Capex'] - tmp['Taxes']
+
+        # Ownership overrides
+        wi = None; nri = None
+        if df_ownership is not None:
+            match = df_ownership[df_ownership['API14'] == api]
+            if not match.empty:
+                wi  = float(match['WI'].iloc[0])
+                nri = float(match['NRI'].iloc[0])
+
+        # Aggregate volumes & cash
+        gross_oil = tmp['Oil Gross (bbl)'].sum()
+        gross_gas = tmp['Gas Gross (mcf)'].sum()
+        gross_ngl = tmp['NGL Gross (bbl)'].sum()
+        net_oil   = tmp['Oil Net (bbl)'].sum()
+        net_gas   = tmp['Gas Net (mcf)'].sum()
+        net_ngl   = tmp['NGL Net (bbl)'].sum()
+        total_capex = tmp['Capex'].sum()
+        total_opex  = tmp['OpEx'].sum()
+        total_cf    = tmp['Free CF'].sum()
+
+        # PV calculations
+        pv_values = {}
+        total_dcf = 0.0
+        for rate in [0, 9] + list(range(10, 101, 10)):
+            tmp['Discount Factor'] = (1 + rate/100) ** (-(tmp['Months']/12))
+            tmp['Discounted CF']   = tmp['Free CF'] * tmp['Discount Factor']
+            pv = tmp['Discounted CF'].sum()
+            pv_values[f'PV{rate}'] = round(pv/1_000, 2)
+            if rate == 10:
+                total_dcf = pv
+
+        # Build the summary row
+        row = {
+            'API14': api,
+            'WellName': name,
+            'WI (%)': f"{wi*100:.2f}%" if wi is not None else None,
+            'NRI (%)': f"{nri*100:.2f}%" if nri is not None else None,
+            'Gross Oil (Mbbl)': round(gross_oil/1_000, 2),
+            'Gross Gas (Mmcf)': round(gross_gas/1_000, 2),
+            'Gross NGL (Mbbl)': round(gross_ngl/1_000, 2),
+            'Net Oil (Mbbl)':   round(net_oil/1_000, 2),
+            'Net Gas (Mmcf)':   round(net_gas/1_000, 2),
+            'Net NGL (Mbbl)':   round(net_ngl/1_000, 2),
+            'Total Capex (M$)': round(total_capex/1_000, 2),
+            'Total OpEx (M$)':  round(total_opex/1_000, 2),
+            'Net CF (M$)':      round(total_cf/1_000, 2),
+            'Discounted CF (M$)': round(total_dcf/1_000, 2),
+            **pv_values
+        }
+        summary_rows.append(row)
+
+    # Build DataFrame and write to Excel
+    df_summary = pd.DataFrame(summary_rows)
+    df_summary = df_summary.sort_values('PV10', ascending=False).reset_index(drop=True)
+    df_summary.to_excel(output_path, index=False)
+
+    return output_path
+
+
 # ------------------------------------------------------------------------------
 # 5. Export Buttons
 # ------------------------------------------------------------------------------
