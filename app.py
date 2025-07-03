@@ -182,7 +182,8 @@ def calculate_cashflows(wells, effective_date, discount_rate, df_strip=None):
         oil_g = np.array(w['Oil (bbl)'])
         gas_g = np.array(w['Gas (mcf)'])
         ngl_g = np.array(w.get('NGL (bbl)', [0]*len(oil_g)))
-        water = np.array(w.get('Water (bbl)', [0]*len(oil_g)])
+        water = np.array(w.get('Water (bbl)', [0] * len(oil_g)))
+
         df = pd.DataFrame({
             'Date': pd.to_datetime(w['Dates']),
             'Oil Gross (bbl)': oil_g,
