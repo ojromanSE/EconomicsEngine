@@ -4,3 +4,5 @@ numpy
 numpy-financial
 matplotlib
 xlsxwriter
+openpyxl
+xlrd
