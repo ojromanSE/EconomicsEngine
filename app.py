@@ -508,10 +508,16 @@ def generate_cashflow_pdf_table(well_cashflows, total_cashflow_df, econ_params, 
     return output_path
 
 
+from matplotlib.backends.backend_pdf import PdfPages
+
 def generate_cashflow_pdf_table_with_monthly(
-    well_cashflows, total_cashflow_df, econ_params,
-    output_path="Cashflow_Report_Monthly.pdf", get_aries_summary_text=None
+    well_cashflows,
+    total_cashflow_df,
+    econ_params,
+    output_path="Cashflow_Report_Monthly.pdf",
+    get_aries_summary_text=None
 ):
+    # Formatting & parameters
     fontname = 'monospace'
     eff_date = pd.to_datetime(econ_params['Effective Date'])
     dr = econ_params.get("Discount Rate", 0.10)
@@ -520,34 +526,61 @@ def generate_cashflow_pdf_table_with_monthly(
     project = econ_params.get("Project", "")
     summary_end = eff_date.year + 19
 
-    from matplotlib.backends.backend_pdf import PdfPages
+    # Write to PDFPages
     with PdfPages(output_path) as pdf:
-        # Merge all wells
+        # --- Page 1: Project total mixed table ---
+        # Prepare combined data
         all_data = pd.concat(well_cashflows, ignore_index=True)
-        all_data['Months'] = (all_data['Date'].dt.to_period('M') - eff_date.to_period('M')).apply(lambda x: x.n)
+        all_data['Months'] = (
+            all_data['Date'].dt.to_period('M')
+            - eff_date.to_period('M')
+        ).apply(lambda x: x.n)
         all_data['Total Revenue'] = all_data[['Oil Revenue','Gas Revenue','NGL Revenue']].sum(axis=1)
         all_data['Free CF'] = all_data['Total Revenue'] - all_data['OpEx'] - all_data['Capex'] - all_data['Taxes']
         all_data['Discount Factor'] = (1 + dr) ** (-(all_data['Months']/12))
         all_data['Discounted CF'] = all_data['Free CF'] * all_data['Discount Factor']
 
-        # Project mixed page
+        # Build monthly & annual summaries
         monthly = all_data[all_data['Months'] < 12].groupby('Date', as_index=False).sum(numeric_only=True)
-        yearly = summarize_yearly(all_data)
-        annual = yearly[(yearly['Year'] > eff_date.year) & (yearly['Year'] <= summary_end) & (yearly['is_dec'])]
+        yearly  = summarize_yearly(all_data)
+        annual  = yearly[
+            (yearly['Year'] > eff_date.year) &
+            (yearly['Year'] <= summary_end) &
+            (yearly['is_dec'])
+        ]
 
+        # Render page 1
         render_mixed_table(
-            monthly, annual, all_data, yearly,
-            "PROJECT TOTAL", pdf, pg=1,
-            wi=1.0, nri=1.0,
-            client_name=client, project_name=project, pv_label=pv_label
+            df_mon=monthly,
+            df_ann=annual,
+            df_full=all_data,
+            df_yr=yearly,
+            title="PROJECT TOTAL",
+            pdf=pdf,
+            pg=1,
+            wi=1.0,
+            nri=1.0,
+            client_name=client,
+            project_name=project,
+            pv_label=pv_label
         )
 
-        # One page per well
-        npv_list = [(d['WellName'].iloc[0], d['API14'].iloc[0], d['Discounted CF'].sum()) for d in well_cashflows]
+        # --- Pages 2+ : one per well ---
+        # Precompute ordering by NPV
+        npv_list = [
+            (d['WellName'].iloc[0], d['API14'].iloc[0], d['Discounted CF'].sum())
+            for d in well_cashflows
+        ]
+        sorted_wells = sorted(npv_list, key=lambda x: x[2], reverse=True)
+
         page = 2
-        for name, api, _ in sorted(npv_list, key=lambda x: x[2], reverse=True):
+        for name, api, _ in sorted_wells:
             df = next(d for d in well_cashflows if d['API14'].iloc[0] == api).copy()
-            df['Months'] = (df['Date'].dt.to_period('M') - eff_date.to_period('M')).apply(lambda x: x.n)
+            # Recompute metrics for this well
+            df['Months'] = (
+                df['Date'].dt.to_period('M')
+                - eff_date.to_period('M')
+            ).apply(lambda x: x.n)
             df['Total Revenue'] = df[['Oil Revenue','Gas Revenue','NGL Revenue']].sum(axis=1)
             df['Free CF'] = df['Total Revenue'] - df['OpEx'] - df['Capex'] - df['Taxes']
             df['Discount Factor'] = (1 + dr) ** (-(df['Months']/12))
@@ -555,17 +588,30 @@ def generate_cashflow_pdf_table_with_monthly(
 
             mon = df[df['Months'] < 12].groupby('Date', as_index=False).sum(numeric_only=True)
             yrly = summarize_yearly(df)
-            ann = yrly[(yrly['Year'] > eff_date.year) & (yrly['Year'] <= summary_end) & (yrly['is_dec'])]
+            ann  = yrly[
+                (yrly['Year'] > eff_date.year) &
+                (yrly['Year'] <= summary_end) &
+                (yrly['is_dec'])
+            ]
 
             render_mixed_table(
-                mon, ann, df, yrly,
-                f"{name} (API: {api})", pdf, pg=page,
-                wi=df['WI'].iloc[0], nri=df['NRI'].iloc[0],
-                client_name=client, project_name=project, pv_label=pv_label
+                df_mon=mon,
+                df_ann=ann,
+                df_full=df,
+                df_yr=yrly,
+                title=f"{name} (API: {api})",
+                pdf=pdf,
+                pg=page,
+                wi=df['WI'].iloc[0],
+                nri=df['NRI'].iloc[0],
+                client_name=client,
+                project_name=project,
+                pv_label=pv_label
             )
             page += 1
 
     return output_path
+
 
 
 @st.cache_data
