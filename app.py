@@ -277,41 +277,68 @@ def summarize_yearly(df):
 
 def get_aries_summary_text(df, meta):
     df = df.copy()
+
+    # Ensure Months column
+    if 'Months' not in df.columns:
+        df['Months'] = (
+            df['Date'].dt.to_period('M') - df['Date'].min().to_period('M')
+        ).apply(lambda x: x.n)
+
+    # Ensure Capex column
+    if 'Capex' not in df.columns:
+        df['Capex'] = 0.0
+
+    # Net CF = Free CF if present else compute
+    if 'Free CF' not in df.columns:
+        df['Free CF'] = df.get('Total Revenue', 0) - df.get('OpEx', 0) - df['Capex'] - df.get('Taxes', 0)
     df['Net CF'] = df['Free CF']
-    initial_capex = df.loc[df['Months']==0,'Capex'].sum() if (df['Months']==0).any() else 0.0
-    df.loc[df['Months']==0,'Net CF'] -= initial_capex
-    df['YearIdx'] = (df['Months']/12).apply(np.floor).astype(int)
-    cf_list = [-initial_capex] + [df[df['YearIdx']==y]['Net CF'].sum() for y in range(1,21)]
-    irr = round(npf.irr(cf_list)*100,2) if cf_list[0]<0 else None
+
+    # Initial CapEx at month 0
+    if (df['Months'] == 0).any():
+        initial_capex = df.loc[df['Months'] == 0, 'Capex'].sum()
+        df.loc[df['Months'] == 0, 'Net CF'] -= initial_capex
+    else:
+        initial_capex = 0.0
+
+    # Year index for IRR
+    df['YearIdx'] = (df['Months'] / 12).apply(np.floor).astype(int)
+
+    # Build cashflow list
+    cf_list = [-initial_capex] + [
+        df[df['YearIdx'] == year]['Net CF'].sum() for year in range(1, 21)
+    ]
+
+    # IRR
+    irr = None
+    if cf_list[0] < 0:
+        irr_val = npf.irr(cf_list)
+        if irr_val is not None and not np.isnan(irr_val):
+            irr = round(irr_val * 100, 2)
     irr_line = f"RATE-OF-RETURN %   {irr:>8.2f}" if irr is not None else "RATE-OF-RETURN %       N/A"
+
+    # Payout
     df['Cum Net CF'] = df['Net CF'].cumsum()
-    pm = df[df['Cum Net CF']>=0]['Months'].min()
-    payout = round(pm/12,2) if pd.notnull(pm) else None
-    payout_line = f"PAYOUT TIME, YRS.   {payout:>8.2f}" if payout is not None else "PAYOUT TIME, YRS.       N/A"
+    payout_month = df[df['Cum Net CF'] >= 0]['Months'].min()
+    if pd.notnull(payout_month):
+        payout_yrs = round(payout_month / 12, 2)
+        payout_line = f"PAYOUT TIME, YRS.   {payout_yrs:>8.2f}"
+    else:
+        payout_line = "PAYOUT TIME, YRS.       N/A"
+
+    # PV lines
     pv_lines = build_pv_summary(df)
-    header = f"{'':<20}        OIL              GAS             WATER"
-    left = [
-        f"GROSS WELLS         {1.0:>10.2f}",
-        f"GROSS RES., MB      {df['Oil Gross (bbl)'].sum()/1000:>10.2f}",
-        f"NET RES., MB        {df['Oil Net (bbl)'].sum()/1000:>10.2f}",
-        f"INITIAL N.R.I., %   {meta.get('NRI',0.0):>10.2f}"
+
+    # Assemble summary
+    lines = [
+        irr_line,
+        payout_line,
+        "",
+        " P.W. %            P.W., M$",
+        *pv_lines,
+        ""
     ]
-    right = [
-        f"GROSS WELLS         0.00",
-        f"GROSS RES., MMcf    {df['Gas Gross (mcf)'].sum()/1000:>10.2f}",
-        f"NET RES., MMcf      {df['Gas Net (mcf)'].sum()/1000:>10.2f}",
-        f"INITIAL W.I., %     {meta.get('WI',0.0):>10.2f}"
-    ]
-    water = [
-        f"GROSS WELLS         0.00",
-        f"GROSS WATER, MB     {df['Water Gross (bbl)'].sum()/1000:>10.2f}",
-        "NET RES., MB        0.00",""
-    ]
-    lines = [header] + [f"{l}    {r}    {w}" for l,r,w in zip(left,right,water)]
-    months = (df['Date'].max().to_period("M")-df['Date'].min().to_period("M")).n+1
-    dur = round(months/12,2)
-    lines += [f"LIFE YRS          {dur:>12.2f}", irr_line, payout_line, "", " P.W. %            P.W., M$"] + pv_lines + [""]
     return "\n".join(lines)
+
 
 def render_cashflow_page(
     title, df_yearly, raw_df, pdf, page_num,
