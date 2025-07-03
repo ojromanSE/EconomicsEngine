@@ -313,26 +313,45 @@ def get_aries_summary_text(df, meta):
     lines += [f"LIFE YRS          {dur:>12.2f}", irr_line, payout_line, "", " P.W. %            P.W., M$"] + pv_lines + [""]
     return "\n".join(lines)
 
-def render_cashflow_page(title, df_yearly, raw_df, pdf, page_num,
-                         fontname, effective_date_str,
-                         client_name, project_name,
-                         pv_label,
-                         get_aries_summary_text):
-    headers = ["Year","Oil Gross","Gas Gross","NGL Gross","Water Gross",
-               "Oil Net","Gas Net","NGL Net","Oil $","Gas $","NGL $",
-               "Total Rev","Taxes","OpEx","Capex","Free CF","Disc CF"]
-    units   = ["","(Mbbl)","(MMcf)","(Mbbl)","(Mbbl)","(Mbbl)","(MMcf)","(Mbbl)",
-               "($/bbl)","($/mcf)","($/bbl)","(M$)","(M$)","(M$)","(M$)","(M$)","(M$)"]
-    widths  = [9,10,10,10,10,10,10,10,8,8,8,11,8,8,8,11,11]
-    def fmt(v): return f"{v/1000:,.2f}" if pd.notnull(v) else " - "
-    def fmt_p(v): return f"{v:,.2f}" if pd.notnull(v) else " - "
-    def row(vals): return " ".join(str(x).rjust(w) for x,w in zip(vals,widths))
+def render_cashflow_page(
+    title, df_yearly, raw_df, pdf, page_num,
+    fontname, effective_date_str,
+    client_name, project_name,
+    pv_label,
+    get_aries_summary_text
+):
+    headers = [
+        "Year", "Oil Gross", "Gas Gross", "NGL Gross", "Water Gross",
+        "Oil Net", "Gas Net", "NGL Net",
+        "Oil $", "Gas $", "NGL $",
+        "Total Rev", "Taxes", "OpEx", "Capex", "Free CF", "Disc CF"
+    ]
+    units = [
+        "     ", "(Mbbl)", "(MMcf)", "(Mbbl)", "(Mbbl)",
+        "(Mbbl)", "(MMcf)", "(Mbbl)",
+        "($/bbl)", "($/mcf)", "($/bbl)",
+        "(M$)", "(M$)", "(M$)", "(M$)", "(M$)", "(M$)"
+    ]
+    col_w = [9,10,10,10,10,10,10,10,8,8,8,11,8,8,8,11,11]
 
-    df_detail = df_yearly[(df_yearly['is_dec'])&(df_yearly['Year']<=pd.to_datetime(effective_date_str).year+19)]
-    total = df_yearly.sum(numeric_only=True)
+    def fmt(v, scale=1_000):
+        return f"{v/scale:,.2f}" if pd.notnull(v) else "   -   "
 
-    fig, ax = plt.subplots(figsize=(15,0.6+0.25*(len(df_detail)+6)))
+    def fmt_p(v):
+        return f"{v:,.2f}" if pd.notnull(v) else "   -   "
+
+    def format_row(vals, widths):
+        return " ".join(str(v).rjust(w) for v, w in zip(vals, widths))
+
+    # Filter December years up to 20-year horizon
+    cutoff_year = pd.to_datetime(effective_date_str).year + 19
+    df_detail = df_yearly[(df_yearly['is_dec']) & (df_yearly['Year'] <= cutoff_year)]
+    total_row = df_yearly.sum(numeric_only=True)
+
+    fig, ax = plt.subplots(figsize=(15, 0.6 + 0.25 * (len(df_detail) + 6)))
     ax.axis("off")
+
+    # Header text
     ax.text(0.5,1.06,"Schaper Energy Economics Engine",ha='center',va='bottom',
             fontsize=12,fontweight='bold',fontname=fontname,transform=ax.transAxes)
     ax.text(0.5,1.03,f"Effective Date: {effective_date_str}",ha='center',va='bottom',
@@ -342,43 +361,69 @@ def render_cashflow_page(title, df_yearly, raw_df, pdf, page_num,
     ax.text(0.5,0.975,f"Project: {project_name} | {pv_label}",ha='center',va='bottom',
             fontsize=10,fontname=fontname,transform=ax.transAxes)
 
-    lines = [title, row(headers), row(units)]
-    for _,r in df_detail.iterrows():
-        vals = [
-            int(r['Year']),
-            fmt(r['Oil Gross (bbl)']), fmt(r['Gas Gross (mcf)']),
-            fmt(r['NGL Gross (bbl)']), fmt(r.get('Water Gross (bbl)',0)),
-            fmt(r['Oil Net (bbl)']), fmt(r['Gas Net (mcf)']),
-            fmt(r['NGL Net (bbl)']), fmt_p(r['Eff Oil Price']),
-            fmt_p(r['Eff Gas Price']), fmt_p(r['Eff NGL Price']),
-            fmt(r['Total Revenue']), fmt(r['Taxes']), fmt(r['OpEx']),
-            fmt(r['Capex']), fmt(r['Free CF']), fmt(r['Discounted CF'])
-        ]
-        lines.append(row(vals))
-    total_vals = ["TOTAL"] + [
-        fmt(total[c]) if c in total else "" for c in [
-            'Oil Gross (bbl)','Gas Gross (mcf)','NGL Gross (bbl)','Water Gross (bbl)',
-            'Oil Net (bbl)','Gas Net (mcf)','NGL Net (bbl)'
-        ]
-    ] + ["","",""] + [
-        fmt(total['Total Revenue']), fmt(total['Taxes']), fmt(total['OpEx']),
-        fmt(total['Capex']), fmt(total['Free CF']), fmt(total['Discounted CF'])
+    lines = [
+        title,
+        format_row(headers, col_w),
+        format_row(units, col_w)
     ]
-    lines.append(row(total_vals))
 
-    wi = raw_df['WI'].iloc[0] if 'WI' in raw_df else 1.0
-    nri= raw_df['NRI'].iloc[0] if 'NRI' in raw_df else 0.75
-    summary = get_aries_summary_text(raw_df, {'WI':wi,'NRI':nri})
+    for _, r in df_detail.iterrows():
+        row = [
+            int(r['Year']),
+            fmt(r.get('Oil Gross (bbl)')),
+            fmt(r.get('Gas Gross (mcf)')),
+            fmt(r.get('NGL Gross (bbl)')),
+            fmt(r.get('Water Gross (bbl)', 0.0)),
+            fmt(r.get('Oil Net (bbl)')),
+            fmt(r.get('Gas Net (mcf)')),
+            fmt(r.get('NGL Net (bbl)')),
+            fmt_p(r.get('Eff Oil Price')),
+            fmt_p(r.get('Eff Gas Price')),
+            fmt_p(r.get('Eff NGL Price')),
+            fmt(r.get('Total Revenue')),
+            fmt(r.get('Taxes')),
+            fmt(r.get('OpEx')),
+            fmt(r.get('Capex')),
+            fmt(r.get('Free CF')),
+            fmt(r.get('Discounted CF')),
+        ]
+        lines.append(format_row(row, col_w))
 
-    ax.text(0,0.94,"\n".join(lines),ha='left',va='top',
-            fontsize=7,fontname=fontname,transform=ax.transAxes)
-    ax.text(0.01,0.02,summary,ha='left',va='bottom',
-            fontsize=7,fontname=fontname,transform=ax.transAxes)
-    ax.text(0.5,0.01,f"Page {page_num}",ha='center',va='bottom',
-            fontsize=8,fontname=fontname,transform=ax.transAxes)
+    # TOTAL row
+    total_vals = [
+        "TOTAL",
+        fmt(total_row.get('Oil Gross (bbl)')),
+        fmt(total_row.get('Gas Gross (mcf)')),
+        fmt(total_row.get('NGL Gross (bbl)')),
+        fmt(total_row.get('Water Gross (bbl)', 0.0)),
+        fmt(total_row.get('Oil Net (bbl)')),
+        fmt(total_row.get('Gas Net (mcf)')),
+        fmt(total_row.get('NGL Net (bbl)')),
+        "", "", "",
+        fmt(total_row.get('Total Revenue')),
+        fmt(total_row.get('Taxes')),
+        fmt(total_row.get('OpEx')),
+        fmt(total_row.get('Capex')),
+        fmt(total_row.get('Free CF')),
+        fmt(total_row.get('Discounted CF')),
+    ]
+    lines.append(format_row(total_vals, col_w))
+
+    # Aries summary text
+    wi = raw_df.get('WI', pd.Series([1.0])).iloc[0]
+    nri= raw_df.get('NRI',pd.Series([0.75])).iloc[0]
+    summary = get_aries_summary_text(raw_df, {'WI': wi, 'NRI': nri})
+
+    ax.text(0, 0.94, "\n".join(lines), ha='left', va='top',
+            fontname=fontname, fontsize=7, transform=ax.transAxes)
+    ax.text(0.01, 0.02, summary, ha='left', va='bottom',
+            fontname=fontname, fontsize=7, transform=ax.transAxes)
+    ax.text(0.5, 0.01, f"Page {page_num}", ha='center', va='bottom',
+            fontsize=8, fontname=fontname, transform=ax.transAxes)
 
     pdf.savefig(fig)
     plt.close(fig)
+
 
 def render_mixed_table(
     df_mon, df_ann, df_full, df_yr, title, pdf, pg,
