@@ -3,6 +3,4 @@ pandas
 numpy
 numpy-financial
 matplotlib
-python-dateutil
-openpyxl
-xlrd
+xlsxwriter
